@@ -274,6 +274,11 @@ void Scanner::run_one_scan(Db& db) {
 
     std::vector<fs::path> live_paths;
     live_paths.reserve(1024);
+    // Roots actually present + walked this run. Any DB path that does NOT
+    // descend from one of these is protected from the deletion sweep: it
+    // may live on a temporarily-unmounted volume, and absence here cannot
+    // distinguish "deleted" from "drive not present".
+    std::vector<fs::path> walked_roots;
 
     for (const auto& root : scan_roots_) {
         if (cancel_requested_.load(std::memory_order_acquire)) {
@@ -286,11 +291,12 @@ void Scanner::run_one_scan(Db& db) {
         if (!fs::exists(root, ec) || !fs::is_directory(root, ec)) {
             continue;
         }
+        walked_roots.push_back(root);
         walk_root(db, root, live_paths);
     }
 
     if (!cancel_requested_.load(std::memory_order_acquire)) {
-        sweep_deletions(db, live_paths);
+        sweep_deletions(db, live_paths, walked_roots);
     }
 
     set_state(ScanState::Idle);
@@ -555,8 +561,30 @@ void Scanner::walk_root(Db& db, const fs::path& root,
     commit_txn();
 }
 
+// Pure helper: a DB path is protected from the deletion sweep when it does
+// not descend from any root that the current scan actually walked. Exposed
+// (via a namespace-level shim) so unit tests can drive every edge case
+// without standing up a Scanner + Db.
+bool path_under_any_root(const std::string& path,
+                        const std::vector<fs::path>& walked_roots) {
+    for (const auto& r : walked_roots) {
+        const std::string rs = r.string();
+        if (rs.empty()) continue;
+        if (path.compare(0, rs.size(), rs) == 0) {
+            // Match either the exact root or a child (followed by '/').
+            if (path.size() == rs.size() ||
+                path[rs.size()] == '/' ||
+                (!rs.empty() && rs.back() == '/')) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 void Scanner::sweep_deletions(Db& db,
-                              const std::vector<fs::path>& live_paths) {
+                              const std::vector<fs::path>& live_paths,
+                              const std::vector<fs::path>& walked_roots) {
     set_state(ScanState::Cleaning);
 
     std::unordered_set<std::string> live;
@@ -585,8 +613,15 @@ void Scanner::sweep_deletions(Db& db,
             }
             std::string path(reinterpret_cast<const char*>(p),
                              static_cast<std::size_t>(n));
-            // A path is stale if either we walked the corresponding root and
-            // didn't see it, OR the file is simply absent on disk.
+            // A path is stale only if it descends from a root we walked
+            // this run (so absence is informative) AND the walker did not
+            // see it AND the file truly is missing from disk. The
+            // walked-root check protects libraries on a temporarily
+            // unmounted volume — for those, absence here cannot be
+            // distinguished from "drive not present".
+            if (!path_under_any_root(path, walked_roots)) {
+                continue;
+            }
             if (live.find(path) == live.end()) {
                 std::error_code ec;
                 if (!std::filesystem::exists(path, ec)) {

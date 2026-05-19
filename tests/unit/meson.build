@@ -220,4 +220,12 @@ test_session_persistence = executable(
 )
 test('session_persistence', test_session_persistence)
 
+test_scanner_protect_unmounted = executable(
+  'test_scanner_protect_unmounted',
+  'scanner_protect_unmounted.cpp',
+  include_directories : include_directories('../../src/library'),
+  dependencies : [library_dep, doctest_dep],
+)
+test('scanner_protect_unmounted', test_scanner_protect_unmounted)
+
 

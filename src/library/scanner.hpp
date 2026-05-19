@@ -19,6 +19,14 @@
 
 namespace fidelis::library {
 
+// Test seam: predicate used by the deletion sweep to decide whether an
+// existing DB path is "under a root we just walked". A path that fails this
+// check is protected from deletion this run — it may live on a temporarily
+// unmounted volume. Pure; exposed so unit tests can exercise every case.
+bool path_under_any_root(const std::string& path,
+                        const std::vector<std::filesystem::path>& walked_roots);
+
+
 // Background scanner. Owns its own write Db connection. Wakes when
 // `request_scan()` is called or shutdown_ is set.
 class Scanner {
@@ -52,7 +60,8 @@ private:
     void walk_root(Db& db, const std::filesystem::path& root,
                    std::vector<std::filesystem::path>& live_paths);
     void sweep_deletions(Db& db,
-                         const std::vector<std::filesystem::path>& live_paths);
+                         const std::vector<std::filesystem::path>& live_paths,
+                         const std::vector<std::filesystem::path>& walked_roots);
     bool path_ignored(const std::filesystem::path& p) const;
     void emit(DeltaEvent::Kind k, std::int64_t id,
               const std::filesystem::path& p);
