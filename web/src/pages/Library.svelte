@@ -3,13 +3,15 @@
   import SearchBar from '../components/SearchBar.svelte'
   import AlbumGrid from '../components/AlbumGrid.svelte'
   import AlbumDetail from '../components/AlbumDetail.svelte'
+  import FolderBrowse from '../components/FolderBrowse.svelte'
   import { fmtTime } from '../lib/utils'
-  import { Plus } from 'lucide-svelte'
+  import { FolderOpen, Plus } from 'lucide-svelte'
   import { onMount } from 'svelte'
 
   let albums = $state<Album[]>([])
   let loading = $state(true)
   let selected = $state<Album | null>(null)
+  let browsing = $state(false)
 
   let searchActive = $state(false)
   let searchResults = $state<LibTrack[]>([])
@@ -55,11 +57,20 @@
 </script>
 
 <div class="mx-auto flex h-full max-w-6xl flex-col gap-5 p-6">
-  <header class="flex items-center justify-between">
+  <header class="flex items-center justify-between gap-3">
     <h1 class="text-2xl font-bold text-white">Library</h1>
-    <span class="text-sm text-white/40">
-      {albums.length} album{albums.length === 1 ? '' : 's'}
-    </span>
+    <div class="flex items-center gap-3">
+      <button
+        class="flex items-center gap-1.5 border border-[#2b2b2b] px-2.5 py-1 text-[10px] uppercase tracking-[0.15em] text-white/65 transition hover:bg-[#141414] hover:text-white"
+        onclick={() => (browsing = true)}
+        title="Append from any folder on disk"
+      >
+        <FolderOpen size={12} /> Browse
+      </button>
+      <span class="text-sm text-white/40">
+        {albums.length} album{albums.length === 1 ? '' : 's'}
+      </span>
+    </div>
   </header>
 
   <SearchBar {onSearch} />
@@ -114,4 +125,11 @@
 
 {#if selected}
   <AlbumDetail album={selected} onClose={() => (selected = null)} />
+{/if}
+
+{#if browsing}
+  <FolderBrowse
+    onClose={() => (browsing = false)}
+    onMutated={() => { /* queue page polls on its own */ }}
+  />
 {/if}

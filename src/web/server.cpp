@@ -22,6 +22,7 @@
 #include <chrono>
 #include <csignal>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -745,6 +746,64 @@ struct WebServer::Impl {
                 }
             }
             send_json(res, 200, arr);
+        });
+
+        // Folder browse. Auth-gated. Lets the UI walk arbitrary readable
+        // directories so the user can append tracks/albums that aren't in
+        // the library yet. Dirs and audio files only; hidden entries hidden.
+        srv.Get("/api/fs", [](const httplib::Request& req,
+                              httplib::Response& res) {
+            std::filesystem::path dir;
+            if (req.has_param("path")) {
+                dir = req.get_param_value("path");
+            } else if (const char* home = std::getenv("HOME"); home && *home) {
+                dir = home;
+            } else {
+                dir = "/";
+            }
+            auto listing = lib::list_audio_dir(dir);
+            if (!listing) {
+                not_found(res);
+                return;
+            }
+            json entries = json::array();
+            for (const auto& e : listing->entries) {
+                entries.push_back({
+                    {"name",   e.name},
+                    {"path",   e.path.string()},
+                    {"is_dir", e.is_dir},
+                    {"size",   e.size},
+                });
+            }
+            send_json(res, 200, json{
+                {"path",    listing->path.string()},
+                {"parent",  listing->parent.string()},
+                {"entries", entries},
+            });
+        });
+
+        // Recursively walks a directory and appends every audio file it
+        // finds, in stable order. Returns the list of paths queued so the
+        // UI can confirm. No-op when the queue is unavailable.
+        srv.Post("/api/queue/append-folder", [this](const httplib::Request& req,
+                                                    httplib::Response& res) {
+            auto b = parse_body(req, res);
+            if (!b) return;
+            if (!b->contains("path") || !(*b)["path"].is_string()) {
+                bad_request(res); return;
+            }
+            if (!queue) { no_device(res); return; }
+            auto found = lib::collect_audio_files(
+                (*b)["path"].get<std::string>());
+            if (!found) {
+                not_found(res); return;
+            }
+            json arr = json::array();
+            for (const auto& p : *found) {
+                queue->append(p);
+                arr.push_back(p.string());
+            }
+            send_json(res, 200, json{{"appended", arr}});
         });
 
         srv.Get("/api/devices", [this](const httplib::Request&,

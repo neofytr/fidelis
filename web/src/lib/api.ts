@@ -235,6 +235,28 @@ export const api = {
   ): Promise<{ ok: boolean }> {
     return request('POST', '/api/mixer/set', { name, index, kind, value })
   },
+
+  listFs(path?: string): Promise<FsListing> {
+    const q = path ? `?path=${encodeURIComponent(path)}` : ''
+    return request<FsListing>('GET', `/api/fs${q}`)
+  },
+
+  appendFolder(path: string): Promise<{ appended: string[] }> {
+    return request('POST', '/api/queue/append-folder', { path })
+  },
+}
+
+export interface FsEntry {
+  name: string
+  path: string
+  is_dir: boolean
+  size: number
+}
+
+export interface FsListing {
+  path: string
+  parent: string
+  entries: FsEntry[]
 }
 
 export { ApiError }

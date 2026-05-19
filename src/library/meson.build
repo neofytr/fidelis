@@ -5,6 +5,7 @@ library_sources = files(
   'db.cpp',
   'schema.cpp',
   'scanner.cpp',
+  'fs_browse.cpp',
 )
 
 library_lib = static_library(

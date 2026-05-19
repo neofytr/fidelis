@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -166,6 +167,38 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
+
+// True for path extensions we treat as audio. Lowercase / case-insensitive.
+// The same prefilter the scanner uses, exposed for the web folder-browse and
+// for tests. Magic-byte confirmation still happens later in open_decoder().
+bool has_audio_extension(const std::filesystem::path& p);
+
+struct FsEntry {
+    std::string name;
+    std::filesystem::path path;
+    bool is_dir = false;
+    std::uint64_t size = 0;
+};
+
+struct FsListing {
+    std::filesystem::path path;     // resolved (lexically_normal) listed dir
+    std::filesystem::path parent;   // empty when at "/" or unresolved
+    std::vector<FsEntry> entries;   // dirs first then audio files; both sorted
+};
+
+// Read a directory for the folder-browse REST endpoint: directories plus
+// audio files only (anything else is hidden). Dirs are listed first, then
+// audio files, each group alphabetical case-insensitive. Hidden entries
+// ("." prefix) are skipped. Returns nullopt when the path is not a readable
+// directory.
+std::optional<FsListing> list_audio_dir(const std::filesystem::path& dir);
+
+// Walk a directory recursively and collect every audio file path in stable
+// (lexicographic) order. Used by /api/queue/append-folder so a single REST
+// call queues a whole album. Returns nullopt when `dir` is not a readable
+// directory.
+std::optional<std::vector<std::filesystem::path>>
+collect_audio_files(const std::filesystem::path& dir);
 
 } // namespace fidelis::library
 

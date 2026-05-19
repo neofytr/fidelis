@@ -228,4 +228,11 @@ test_scanner_protect_unmounted = executable(
 )
 test('scanner_protect_unmounted', test_scanner_protect_unmounted)
 
+test_fs_browse = executable(
+  'test_fs_browse',
+  'fs_browse.cpp',
+  dependencies : [library_dep, doctest_dep],
+)
+test('fs_browse', test_fs_browse)
+
 
