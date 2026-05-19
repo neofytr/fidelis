@@ -36,8 +36,11 @@ ok "all commit messages clean"
 
 # 3. No AI-tells in any tracked file (third_party allowed; that's vendored).
 echo "AUDIT 3: tracked tree"
-if git grep -qniIE 'claude|anthropic|as an AI|language model|co-authored-by' -- . ':!third_party'; then
-  git grep -niIE 'claude|anthropic|as an AI|language model|co-authored-by' -- . ':!third_party'
+# The audit script itself names every pattern by definition; exclude it.
+if git grep -qniIE 'claude|anthropic|as an AI|language model|co-authored-by' \
+     -- . ':!third_party' ':!scripts/audit_public_repo.sh'; then
+  git grep -niIE 'claude|anthropic|as an AI|language model|co-authored-by' \
+       -- . ':!third_party' ':!scripts/audit_public_repo.sh'
   fail "AI-tinted language in a tracked file"
 fi
 ok "tracked tree clean"
