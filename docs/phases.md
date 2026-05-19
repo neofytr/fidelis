@@ -16,14 +16,14 @@
 | P1 | Rename project / binary / namespace / config path to `fidelis`; one-time migration from the legacy config path | Done |
 | P2 | USB-only enumeration enforced at source; updated UI copy | Done |
 | P3 | Bearer-token auth: random token on first run, fail-closed when bound non-loopback without one; UI token gate wired | Pending |
-| P4 | Audiophile-core features: session/queue persistence, hardened gapless + CUE sheets, opt-in ReplayGain (off; QUALIFIED when on), robust inotify scanner + folder browse + graceful unmounted paths, DSD hard-refuse | Pending |
+| P4 | Audiophile-core features: session/queue persistence, hardened natural-file gapless, opt-in ReplayGain (off; QUALIFIED when on), robust scanner + folder browse + graceful unmounted paths, DSD hard-refuse. CUE deferred to 1.1 (see below). | In progress |
 | P5 | Control surfaces: `systemd --user` unit, REST-backed CLI subcommands, MPRIS / media-key polish, mobile-responsive UI | Pending |
 | P6 | Quality and release gates: CI build/test matrix, automated bit-perfect loopback test as a CI gate, full docs set, public-repo audit | Pending |
 | P7 | Package + release: AUR PKGBUILD + signed source tarball, prebuilt binary tarball + systemd unit installer, Debian `.deb` + Fedora COPR, tag v1.0.0 | Pending |
 
 ## Beyond v1.0
 
-- **1.1** — Native ALSA DSD (`DSD_U16/U32_LE/BE`) and DoP fallback; DSD format negotiation in `format_match`; DSD-aware Pipeline view.
+- **1.1** — Native ALSA DSD (`DSD_U16/U32_LE/BE`) and DoP fallback; DSD format negotiation in `format_match`; DSD-aware Pipeline view. CUE sheets: sidecar `.cue` parser, virtual queue entries with `(path, start_frame, end_frame)`, and an engine `stop_frame` mechanism so playback is gapless *across* virtual tracks within a single audio file (Dark-Side-of-the-Moon style continuous albums).
 - **1.2** — M3U / M3U8 playlists, Last.fm scrobble (opt-in), exportable session bit-perfect log.
 - **Backlog (post-1.x)** — Optional libsoxr resampler with QUALIFIED verdict (per-device opt-in), AirPlay / DLNA renderer mode, ALSA loopback as a transparent capture endpoint for offline null tests.
 
