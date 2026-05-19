@@ -1,0 +1,86 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # Daemon build + unit/integration suite (the suites that don't need real
+  # ALSA hardware run in CI; the needs-alsa / needs-loopback suites are
+  # filtered out on the runner, where there is no DAC).
+  build-test:
+    name: build + test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            meson ninja-build pkg-config g++ \
+            libasound2-dev libflac-dev libmpg123-dev libvorbis-dev libopus-dev \
+            libsqlite3-dev libsdbus-c++-dev libudev-dev \
+            python3 ffmpeg
+
+      - name: Regenerate test fixtures (consistent tag strings)
+        run: bash fixtures/_make_format_set.sh
+
+      - name: Meson configure
+        run: meson setup build
+
+      - name: Build
+        run: ninja -C build
+
+      # The full suite minus the two hardware-only gates. Those are exercised
+      # by the loopback job below on a self-hosted runner with a real DAC.
+      - name: Run hardware-free suite
+        run: |
+          meson test -C build --print-errorlogs \
+            --no-suite needs-alsa --no-suite needs-loopback
+
+      - name: Upload meson testlog on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: meson-testlog-${{ matrix.os }}
+          path: build/meson-logs/testlog.txt
+
+  # Frontend type-check + production bundle. Same job ensures web/dist
+  # committed under main isn't drifting from the source.
+  web:
+    name: web build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install web deps
+        working-directory: web
+        run: npm ci
+      - name: Type-check + build
+        working-directory: web
+        run: npm run build
+
+  # The bit-perfect loopback gate. Only meaningful on a host with an ALSA
+  # loopback-capable DAC; runs on a self-hosted runner labelled fidelis-rt.
+  # The job is non-blocking (no `needs:`) until hardware is wired up.
+  loopback:
+    name: bit-perfect loopback gate
+    if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[loopback]') }}
+    runs-on: [self-hosted, fidelis-rt]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure + build
+        run: |
+          meson setup build
+          ninja -C build
+      - name: Run needs-loopback suite
+        run: meson test -C build --print-errorlogs --suite needs-loopback

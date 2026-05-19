@@ -1,0 +1,76 @@
+.TH FIDELIS 1 "2026" "fidelis" "User Commands"
+.SH NAME
+fidelis \- bit-perfect Linux music player for external USB DACs
+.SH SYNOPSIS
+.B fidelis
+.RI [ OPTIONS "] [" FILE ]
+.br
+.B fidelis ctl
+.I VERB
+.RI [ ARGS ]
+.SH DESCRIPTION
+.B fidelis
+plays audio files from disk straight to an external USB DAC through ALSA, with no sound server in the audio path, no resampling, and no software volume. The DAC is held exclusive while playing; its sample rate is switched per track. Every stage of the decode \(rA ring \(rA ALSA pipeline is exposed by the web UI on
+.I http://localhost:7800
+along with a three-state bit-perfect verdict.
+.SH OPTIONS
+.TP
+.BI \-\-config " PATH"
+Override the config file path. Defaults to
+.IR $XDG_CONFIG_HOME/fidelis/config.toml ,
+falling back to
+.IR ~/.config/fidelis/config.toml .
+.TP
+.BI \-\-library\-db " PATH"
+Override the library SQLite path. Defaults to
+.IR $XDG_DATA_HOME/fidelis/library.db .
+.TP
+.B \-V, \-\-version
+Print version and exit.
+.TP
+.B \-h, \-\-help
+Print help and exit.
+.TP
+.I FILE
+A positional file is appended to the queue at startup.
+.SH CTL VERBS
+The
+.B ctl
+subcommand talks to a running daemon over its REST interface. Host, port and bearer token are read from the same config file the daemon writes.
+.TP
+.B status
+Print current player state as JSON.
+.TP
+.B play | pause | toggle
+Resume / pause / flip playback.
+.TP
+.B next | prev
+Jump to the next / previous queued track.
+.TP
+.BI enqueue " PATH"
+Append a file to the queue.
+.TP
+.B clear
+Clear the queue.
+.SH FILES
+.TP
+.I ~/.config/fidelis/config.toml
+Daemon config: device, audio, library, web, replaygain.
+.TP
+.I ~/.local/share/fidelis/library.db
+SQLite tag database.
+.TP
+.I ~/.local/share/fidelis/session.json
+Persisted queue + position so a restart returns to the same view (paused).
+.SH BIT-PERFECT
+The decoder writes the file's samples directly to ALSA. When ReplayGain is enabled, hardware volume is below max, or any other deviation is active, the Pipeline verdict drops to QUALIFIED with the contributing condition listed.
+.SH OUT OF SCOPE
+DSP, EQ, software volume, system-wide audio routing, multi-zone, plugins, native X11 / Wayland GUI, and non-USB outputs (onboard codecs / HDMI) are explicitly out of scope.
+.SH SEE ALSO
+.BR alsamixer (1),
+.BR playerctl (1),
+.BR systemctl (1)
+.SH AUTHOR
+Maintained at https://github.com/neofytr/fidelis
+.SH LICENSE
+GPL-3.0-or-later.
