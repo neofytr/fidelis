@@ -51,6 +51,14 @@ public:
     // Load and play the track at index. Clamps to [0, size-1].
     void jump(int index);
 
+    // Repopulate the queue from a persisted session without auto-playing.
+    // Replaces tracks_ with `paths`, sets current_index_ to `index` clamped
+    // to a valid range, loads that track into the engine, seeks to
+    // `position_frames`, and stays paused. Per the persistence contract, the
+    // daemon never auto-resumes — the user explicitly hits play.
+    void restore(std::vector<std::filesystem::path> paths, int index,
+                 std::uint64_t position_frames);
+
     // ── Query ─────────────────────────────────────────────────────────────────
 
     std::vector<std::filesystem::path> tracks() const;

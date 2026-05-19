@@ -143,6 +143,26 @@ void Queue::jump(int index) {
     (void)engine_.play();
 }
 
+void Queue::restore(std::vector<std::filesystem::path> paths, int index,
+                    std::uint64_t position_frames) {
+    std::lock_guard lk(mtx_);
+    tracks_ = std::move(paths);
+    const int sz = static_cast<int>(tracks_.size());
+    if (sz == 0) {
+        current_index_ = -1;
+        return;
+    }
+    current_index_ = std::clamp(index, 0, sz - 1);
+    engine_.cancel_preload();
+    (void)engine_.load(tracks_[static_cast<std::size_t>(current_index_)]);
+    if (position_frames > 0) {
+        (void)engine_.seek(position_frames);
+    }
+    (void)engine_.pause();  // explicit: never auto-resume on restore
+    // Stage the next track so a play+gapless run picks up cleanly.
+    preload_next_locked_();
+}
+
 std::vector<std::filesystem::path> Queue::tracks() const {
     std::lock_guard lk(mtx_);
     return tracks_;

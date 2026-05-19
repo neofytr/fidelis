@@ -6,6 +6,7 @@
 #include <fidelis/engine/engine.hpp>
 #include <fidelis/library/library.hpp>
 #include <fidelis/queue/queue.hpp>
+#include <fidelis/session/session.hpp>
 #include <fidelis/version.hpp>
 #include <fidelis/web/server.hpp>
 
@@ -16,10 +17,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <chrono>
 #include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 
 #include <unistd.h>
 
@@ -288,9 +291,55 @@ int main(int argc, char** argv) {
                 dbus->notify_track_loaded();
             }
         });
+        // Restore the persisted session before honouring a CLI file. The
+        // CLI argument wins and replaces the queue when both are present.
+        const auto session_path = fidelis::session::default_path();
+        if (auto snap = fidelis::session::load(session_path);
+            snap && !snap->tracks.empty() && args.file.empty()) {
+            queue->restore(std::move(snap->tracks), snap->current_index,
+                           snap->position_frames);
+        }
         if (!args.file.empty()) {
             queue->append(args.file);
         }
+    }
+
+    // Periodic session save. Runs on its own thread at low rate; serialises
+    // the queue + current track + position every few seconds while playing
+    // and once on shutdown. Writes are atomic so a kill mid-save can never
+    // truncate the file. Cheap I/O — small JSON, rename-over.
+    std::atomic<bool> session_saver_run{engine != nullptr && queue != nullptr};
+    std::thread session_saver;
+    if (session_saver_run) {
+        session_saver = std::thread([&engine, &queue, &session_saver_run] {
+            using namespace std::chrono_literals;
+            const auto path = fidelis::session::default_path();
+            auto last_index = -2;
+            std::uint64_t last_position = 0;
+            std::size_t last_size = 0;
+            while (session_saver_run.load(std::memory_order_relaxed)) {
+                std::this_thread::sleep_for(2s);
+                if (!queue || !engine) continue;
+                fidelis::session::Snapshot s;
+                s.tracks = queue->tracks();
+                s.current_index = queue->current_index();
+                const auto snap = engine->pipeline_snapshot();
+                if (snap.output.frames_written >=
+                    snap.output.frames_written_at_track_start) {
+                    s.position_frames = snap.output.frames_written -
+                                        snap.output.frames_written_at_track_start;
+                }
+                if (s.tracks.size() == last_size &&
+                    s.current_index == last_index &&
+                    s.position_frames == last_position) {
+                    continue;  // nothing changed; spare the disk
+                }
+                last_size = s.tracks.size();
+                last_index = s.current_index;
+                last_position = s.position_frames;
+                (void)fidelis::session::save(path, s);
+            }
+        });
     }
 
     // Web server: REST control surface + 10 Hz telemetry WebSocket. Always
@@ -332,6 +381,25 @@ int main(int argc, char** argv) {
     web_server->start();
 
     wait_for_termination_signal();
+
+    // Final synchronous save so a clean exit captures the very latest state
+    // (the periodic thread may be mid-sleep when the signal fires).
+    if (engine != nullptr && queue != nullptr) {
+        fidelis::session::Snapshot s;
+        s.tracks = queue->tracks();
+        s.current_index = queue->current_index();
+        const auto snap = engine->pipeline_snapshot();
+        if (snap.output.frames_written >=
+            snap.output.frames_written_at_track_start) {
+            s.position_frames = snap.output.frames_written -
+                                snap.output.frames_written_at_track_start;
+        }
+        (void)fidelis::session::save(fidelis::session::default_path(), s);
+    }
+    session_saver_run.store(false, std::memory_order_relaxed);
+    if (session_saver.joinable()) {
+        session_saver.join();
+    }
 
     if (web_server != nullptr) {
         web_server->stop();

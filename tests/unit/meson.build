@@ -213,4 +213,11 @@ test_dsd_refused = executable(
 )
 test('dsd_refused', test_dsd_refused)
 
+test_session_persistence = executable(
+  'test_session_persistence',
+  'session_persistence.cpp',
+  dependencies : [session_dep, doctest_dep],
+)
+test('session_persistence', test_session_persistence)
+
 
