@@ -1,0 +1,37 @@
+Source: fidelis
+Section: sound
+Priority: optional
+Maintainer: neofytr <imagination12344321.com@gmail.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ meson (>= 1.1),
+ ninja-build,
+ pkg-config,
+ g++ (>= 12),
+ libasound2-dev,
+ libflac-dev,
+ libmpg123-dev,
+ libvorbis-dev,
+ libopus-dev,
+ libsqlite3-dev,
+ libsdbus-c++-dev,
+ libudev-dev,
+ nodejs,
+ npm
+Standards-Version: 4.6.2
+Homepage: https://github.com/neofytr/fidelis
+Vcs-Browser: https://github.com/neofytr/fidelis
+Vcs-Git: https://github.com/neofytr/fidelis.git
+
+Package: fidelis
+Architecture: any
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends}
+Description: bit-perfect Linux music player for external USB DACs
+ fidelis plays audio files from disk straight to an external USB DAC
+ through ALSA, with no sound server in the audio path, no resampling,
+ no DSP, and no software volume. The DAC is held exclusive while
+ playing; its sample rate is switched per track. Every stage of the
+ decode -> ring -> ALSA pipeline is exposed by a local web UI, with
+ a live three-state bit-perfect verdict.

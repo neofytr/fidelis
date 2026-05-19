@@ -2,11 +2,9 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0] — 2026-05-19
 
-### Pre-v1.0 development
-
-This section captures the major work done since the project was opened to the public. Pre-release, no version tags yet.
+First public release.
 
 #### Added
 
@@ -39,4 +37,4 @@ This section captures the major work done since the project was opened to the pu
 
 - 34 unit + integration tests covering the bit-perfect, queue, device-pinning, session-persistence, scanner-protection, folder-browse, replaygain, web-security, DSD-refusal, and format-match paths. CI runs the hardware-free subset on every push.
 
-[Unreleased]: https://github.com/neofytr/fidelis/compare/HEAD...HEAD
+[1.0.0]: https://github.com/neofytr/fidelis/releases/tag/v1.0.0

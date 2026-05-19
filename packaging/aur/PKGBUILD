@@ -1,0 +1,55 @@
+# Maintainer: neofytr <imagination12344321.com@gmail.com>
+pkgname=fidelis
+pkgver=1.0.0
+pkgrel=1
+pkgdesc='Bit-perfect Linux music player for external USB DACs (ALSA-direct, no sound server in the audio path)'
+arch=('x86_64' 'aarch64')
+url='https://github.com/neofytr/fidelis'
+license=('GPL-3.0-or-later')
+depends=(
+  'alsa-lib' 'flac' 'mpg123' 'libvorbis' 'opus'
+  'sqlite' 'sdbus-cpp' 'systemd-libs'
+)
+makedepends=('meson' 'ninja' 'pkg-config' 'gcc' 'nodejs' 'npm' 'ffmpeg')
+source=("${pkgname}-${pkgver}.tar.gz::https://github.com/neofytr/fidelis/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('SKIP')  # filled in by release script
+
+prepare() {
+    cd "${pkgname}-${pkgver}"
+    # Web bundle is committed; rebuild only to verify the lockfile in CI.
+    (cd web && npm ci && npm run build)
+}
+
+build() {
+    cd "${pkgname}-${pkgver}"
+    arch-meson build
+    meson compile -C build
+}
+
+check() {
+    cd "${pkgname}-${pkgver}"
+    # Hardware-free subset only; the AUR runner has no DAC.
+    meson test -C build --no-suite needs-alsa --no-suite needs-loopback
+}
+
+package() {
+    cd "${pkgname}-${pkgver}"
+    meson install -C build --destdir "${pkgdir}"
+
+    install -Dm644 packaging/fidelis.service \
+        "${pkgdir}/usr/lib/systemd/user/fidelis.service"
+    install -Dm644 packaging/limits-fidelis.conf \
+        "${pkgdir}/etc/security/limits.d/99-fidelis.conf"
+    install -Dm644 packaging/fidelis.1 \
+        "${pkgdir}/usr/share/man/man1/fidelis.1"
+    install -Dm644 README.md \
+        "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+    install -Dm644 CHANGELOG.md \
+        "${pkgdir}/usr/share/doc/${pkgname}/CHANGELOG.md"
+    install -Dm644 LICENSE \
+        "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+
+    # Web bundle goes to /usr/share so the daemon can serve it system-wide.
+    install -d "${pkgdir}/usr/share/${pkgname}/web"
+    cp -r web/dist "${pkgdir}/usr/share/${pkgname}/web/"
+}

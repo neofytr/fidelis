@@ -1,0 +1,11 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@ --buildsystem=meson
+
+override_dh_auto_configure:
+	cd web && npm ci && npm run build
+	dh_auto_configure
+
+override_dh_auto_test:
+	meson test -C obj-* --no-suite needs-alsa --no-suite needs-loopback
