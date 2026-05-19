@@ -1,0 +1,85 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#ifndef FIDELIS_ENGINE_ERROR_HPP
+#define FIDELIS_ENGINE_ERROR_HPP
+
+#include <cstdint>
+#include <string>
+#include <string_view>
+#include <utility>
+
+namespace fidelis::engine {
+
+enum class ErrorCode : std::uint8_t {
+    FileOpenFailed,
+    WavMalformed,
+    WavUnsupportedTag,
+    FormatNotSupported,
+    DeviceOpenFailed,
+    DeviceBusy,
+    DeviceParamsRejected,
+    WriteFailed,
+    DecoderInitFailed,
+    DecoderReadFailed,
+    DecoderSeekFailed,
+    Sqlite,
+    InvalidArgument,
+    NotFound,
+};
+
+// Sub-reason for FormatNotSupported so the test driver can be specific
+// without parsing free-form text.
+enum class FormatRejection : std::uint8_t {
+    None,
+    RateNotSupported,
+    SampleFormatNotSupported,
+    ChannelCountNotSupported,
+};
+
+constexpr std::string_view error_code_name(ErrorCode c) noexcept {
+    switch (c) {
+    case ErrorCode::FileOpenFailed:
+        return "FileOpenFailed";
+    case ErrorCode::WavMalformed:
+        return "WavMalformed";
+    case ErrorCode::WavUnsupportedTag:
+        return "WavUnsupportedTag";
+    case ErrorCode::FormatNotSupported:
+        return "FormatNotSupported";
+    case ErrorCode::DeviceOpenFailed:
+        return "DeviceOpenFailed";
+    case ErrorCode::DeviceBusy:
+        return "DeviceBusy";
+    case ErrorCode::DeviceParamsRejected:
+        return "DeviceParamsRejected";
+    case ErrorCode::WriteFailed:
+        return "WriteFailed";
+    case ErrorCode::DecoderInitFailed:
+        return "DecoderInitFailed";
+    case ErrorCode::DecoderReadFailed:
+        return "DecoderReadFailed";
+    case ErrorCode::DecoderSeekFailed:
+        return "DecoderSeekFailed";
+    case ErrorCode::Sqlite:
+        return "Sqlite";
+    case ErrorCode::InvalidArgument:
+        return "InvalidArgument";
+    case ErrorCode::NotFound:
+        return "NotFound";
+    }
+    return "?";
+}
+
+struct Error {
+    ErrorCode code;
+    std::string message;
+    FormatRejection rejection = FormatRejection::None;
+
+    Error(ErrorCode c, std::string m) : code(c), message(std::move(m)) {}
+    Error(ErrorCode c, std::string m, FormatRejection r)
+        : code(c), message(std::move(m)), rejection(r) {}
+};
+
+} // namespace fidelis::engine
+
+#endif

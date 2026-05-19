@@ -1,0 +1,130 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---------------------------------------------------------------------------
+   Terminal theme. Black canvas, amber accent, monospace, hairline rules.
+   No blur, no gradients, no rounded corners, no soft shadows. Dense and
+   functional by intent.
+--------------------------------------------------------------------------- */
+
+:root {
+  /* Amber. Pinned -- not derived from cover art. */
+  --accent: 255 176 0;
+  color-scheme: dark;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: #000;
+  color: #d8d8d8;
+  font-family: 'JetBrains Mono', 'IBM Plex Mono', 'SF Mono', ui-monospace,
+    'Cascadia Code', Menlo, Consolas, 'DejaVu Sans Mono', monospace;
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+/* No text-selection cursor on chrome; real text/inputs keep it. */
+* {
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+input,
+textarea,
+[contenteditable] {
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+}
+button,
+a,
+[role='button'],
+[role='slider'] {
+  cursor: pointer;
+}
+
+/* Design-system enforcement: kill every rounded corner, blur and soft glow
+   that individual components ask for. The terminal look is uniformly sharp
+   and flat; this keeps it consistent without touching every utility class. */
+*,
+*::before,
+*::after {
+  border-radius: 0 !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  box-shadow: none !important;
+  text-shadow: none !important;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+}
+
+::selection {
+  background: rgb(var(--accent));
+  color: #000;
+}
+
+@layer components {
+  /* Shared panel classes used across the app. Flat, hairline-bordered. */
+  .glass {
+    background: #0a0a0a;
+    border: 1px solid #1f1f1f;
+  }
+  .glass-strong {
+    background: #0c0c0c;
+    border: 1px solid #2b2b2b;
+  }
+}
+
+/* Solid black wash behind every page (was a radial gradient). */
+.app-bg {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background: #000;
+}
+
+/* Accent helpers. */
+.text-accent {
+  color: rgb(var(--accent)) !important;
+}
+.bg-accent {
+  background-color: rgb(var(--accent)) !important;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #000;
+}
+::-webkit-scrollbar-thumb {
+  background: #2a2a2a;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--accent));
+}
+* {
+  scrollbar-color: #2a2a2a #000;
+  scrollbar-width: thin;
+}
+
+button {
+  font-family: inherit;
+}
+
+.no-select {
+  user-select: none;
+  -webkit-user-select: none;
+}

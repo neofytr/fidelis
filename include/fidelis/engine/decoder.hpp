@@ -1,0 +1,80 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#ifndef FIDELIS_ENGINE_DECODER_HPP
+#define FIDELIS_ENGINE_DECODER_HPP
+
+#include <fidelis/engine/error.hpp>
+#include <fidelis/engine/format.hpp>
+
+#include <cstddef>
+#include <cstdint>
+#include <expected>
+#include <limits>
+#include <span>
+#include <string>
+
+namespace fidelis::engine {
+
+// Tags returned by the decoder. Empty string means "not present in file".
+// `track_no` is a string because containers store both "3" and "3/12" forms;
+// the caller decides whether to keep or trim the slash suffix. `date` is the
+// file's stamp as written, year only when the file only stored a year.
+struct Tags {
+    std::string artist;
+    std::string album_artist; // ALBUMARTIST / TPE2; empty → fall back to artist
+    std::string album;
+    std::string title;
+    std::string track_no;
+    std::string disc_no;  // DISCNUMBER / TPOS; empty when absent
+    std::string date;
+
+    // ReplayGain from file tags — read-only display; not applied to audio path.
+    // NaN when the tag is absent.
+    float rg_track_gain = std::numeric_limits<float>::quiet_NaN(); // dB
+    float rg_track_peak = std::numeric_limits<float>::quiet_NaN();
+    float rg_album_gain = std::numeric_limits<float>::quiet_NaN(); // dB
+    float rg_album_peak = std::numeric_limits<float>::quiet_NaN();
+};
+
+// Streaming PCM decoder. One instance per open file. Single-threaded; the
+// engine owns it on the decode thread.
+//
+// `read()` writes interleaved PCM frames in the format reported by `format()`.
+// Returns the number of frames written; 0 means EOF. Partial fills are
+// allowed (decoder may return fewer than `max_frames` even mid-stream).
+//
+// `dst_frames` must be at least `max_frames * format().frame_bytes()` bytes.
+// Decoders must not write past `max_frames * format().frame_bytes()`.
+//
+// `seek_frame` is best-effort. Implementations may snap to the nearest
+// preceding seek-table entry; some lossy formats only seek to packet
+// boundaries. Callers re-read after seek.
+class IDecoder {
+public:
+    virtual ~IDecoder() = default;
+
+    virtual PcmFormat format() const noexcept = 0;
+
+    // 0 if unknown (rare; some streams without seek tables).
+    virtual std::uint64_t total_frames() const noexcept = 0;
+
+    // Derivable from `format()` and `total_frames()`. Convenience.
+    double duration_seconds() const noexcept {
+        const auto rate = format().sample_rate_hz;
+        if (rate == 0) {
+            return 0.0;
+        }
+        return static_cast<double>(total_frames()) / static_cast<double>(rate);
+    }
+
+    virtual const Tags& tags() const noexcept = 0;
+
+    virtual std::expected<std::size_t, Error>
+    read(std::span<std::byte> dst, std::size_t max_frames) = 0;
+
+    virtual std::expected<void, Error> seek_frame(std::uint64_t frame) = 0;
+};
+
+} // namespace fidelis::engine
+
+#endif

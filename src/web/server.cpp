@@ -1,0 +1,1053 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#include <fidelis/web/server.hpp>
+
+#include <fidelis/config/config.hpp>
+#include <fidelis/engine/engine.hpp>
+#include <fidelis/engine/mixer.hpp>
+#include <fidelis/engine/telemetry.hpp>
+#include <fidelis/library/library.hpp>
+#include <fidelis/queue/queue.hpp>
+
+#include <FLAC/metadata.h>
+
+#include <httplib.h>
+#include <nlohmann/json.hpp>
+
+#include <unistd.h>
+
+#include <algorithm>
+#include <atomic>
+#include <cctype>
+#include <chrono>
+#include <csignal>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <thread>
+#include <unordered_set>
+#include <vector>
+
+namespace fidelis::web {
+
+namespace {
+
+namespace eng = fidelis::engine;
+namespace lib = fidelis::library;
+using json    = nlohmann::json;
+
+constexpr char kJsonMime[] = "application/json";
+
+const char* state_name(eng::State s) noexcept {
+    switch (s) {
+    case eng::State::Idle:
+        return "Idle";
+    case eng::State::Loading:
+        return "Loading";
+    case eng::State::Playing:
+        return "Playing";
+    case eng::State::Paused:
+        return "Paused";
+    case eng::State::Stopped:
+        return "Stopped";
+    case eng::State::Error:
+        return "Error";
+    case eng::State::Disconnected:
+        return "Disconnected";
+    }
+    return "Idle";
+}
+
+std::string format_string(std::uint32_t rate, eng::SampleFormat fmt,
+                          std::uint16_t channels) {
+    return std::to_string(rate) + "/" +
+           std::string(eng::sample_format_name(fmt)) + "/" +
+           std::to_string(channels);
+}
+
+void send_json(httplib::Response& res, int status, const json& body) {
+    res.status = status;
+    res.set_content(body.dump(), kJsonMime);
+}
+
+void ok(httplib::Response& res) {
+    send_json(res, 200, json{{"ok", true}});
+}
+
+void bad_request(httplib::Response& res) {
+    send_json(res, 400, json{{"error", "bad request"}});
+}
+
+void unauthorized(httplib::Response& res) {
+    send_json(res, 401, json{{"error", "unauthorized"}});
+}
+
+void not_found(httplib::Response& res) {
+    send_json(res, 404, json{{"error", "not found"}});
+}
+
+// No audio engine: a device could not be opened (absent / busy). The web UI
+// still serves so the user can pick a working device from /api/devices.
+void no_device(httplib::Response& res) {
+    send_json(res, 503, json{{"error", "no audio device"}});
+}
+
+// Returns nullopt and writes a 400 response when the body is not valid JSON.
+std::optional<json> parse_body(const httplib::Request& req,
+                               httplib::Response& res) {
+    json j = json::parse(req.body, nullptr, /*allow_exceptions=*/false);
+    if (j.is_discarded()) {
+        bad_request(res);
+        return std::nullopt;
+    }
+    return j;
+}
+
+const char* mime_for(const std::filesystem::path& p) noexcept {
+    auto ext = p.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+                   [](unsigned char c) { return static_cast<char>(::tolower(c)); });
+    if (ext == ".jpg" || ext == ".jpeg") {
+        return "image/jpeg";
+    }
+    if (ext == ".png") {
+        return "image/png";
+    }
+    if (ext == ".webp") {
+        return "image/webp";
+    }
+    if (ext == ".gif") {
+        return "image/gif";
+    }
+    if (ext == ".html") {
+        return "text/html; charset=utf-8";
+    }
+    if (ext == ".js" || ext == ".mjs") {
+        return "text/javascript";
+    }
+    if (ext == ".css") {
+        return "text/css";
+    }
+    if (ext == ".json") {
+        return kJsonMime;
+    }
+    if (ext == ".svg") {
+        return "image/svg+xml";
+    }
+    if (ext == ".woff2") {
+        return "font/woff2";
+    }
+    if (ext == ".ico") {
+        return "image/x-icon";
+    }
+    return "application/octet-stream";
+}
+
+bool read_file(const std::filesystem::path& p, std::string& out) {
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(p, ec)) {
+        return false;
+    }
+    std::ifstream f(p, std::ios::binary);
+    if (!f) {
+        return false;
+    }
+    out.assign(std::istreambuf_iterator<char>(f),
+               std::istreambuf_iterator<char>());
+    return true;
+}
+
+json track_json(const lib::Track& t) {
+    return json{
+        {"id", t.id},
+        {"path", t.path.string()},
+        {"title", t.title},
+        {"artist", t.artist},
+        {"album", t.album},
+        {"track_number", t.track_no},
+        {"duration_frames", t.total_frames},
+        {"format", std::to_string(t.sample_rate_hz) + "/" +
+                       std::to_string(t.bit_depth) + "/" +
+                       std::to_string(t.channels)},
+    };
+}
+
+// Scan a FLAC file's metadata blocks for any embedded PICTURE. Prefers
+// FRONT_COVER type; falls back to the first picture found. Returns false
+// when the file has no embedded image or is not a valid FLAC file.
+bool read_flac_embedded_art(const std::filesystem::path& path,
+                             std::string& data_out,
+                             std::string& mime_out) {
+    FLAC__Metadata_Chain* chain = FLAC__metadata_chain_new();
+    if (!chain) {
+        return false;
+    }
+    struct ChainGuard {
+        FLAC__Metadata_Chain* c;
+        ~ChainGuard() { FLAC__metadata_chain_delete(c); }
+    } cg{chain};
+
+    if (!FLAC__metadata_chain_read(chain, path.c_str())) {
+        return false;
+    }
+
+    FLAC__Metadata_Iterator* it = FLAC__metadata_iterator_new();
+    if (!it) {
+        return false;
+    }
+    struct ItGuard {
+        FLAC__Metadata_Iterator* i;
+        ~ItGuard() { FLAC__metadata_iterator_delete(i); }
+    } ig{it};
+
+    FLAC__metadata_iterator_init(it, chain);
+
+    bool found_any = false;
+    do {
+        FLAC__StreamMetadata* block = FLAC__metadata_iterator_get_block(it);
+        if (!block || block->type != FLAC__METADATA_TYPE_PICTURE) {
+            continue;
+        }
+        const auto& pic = block->data.picture;
+        if (pic.type == FLAC__STREAM_METADATA_PICTURE_TYPE_FRONT_COVER) {
+            mime_out.assign(pic.mime_type ? pic.mime_type : "image/jpeg");
+            data_out.assign(reinterpret_cast<const char*>(pic.data),
+                            pic.data_length);
+            return true;
+        }
+        if (!found_any) {
+            mime_out.assign(pic.mime_type ? pic.mime_type : "image/jpeg");
+            data_out.assign(reinterpret_cast<const char*>(pic.data),
+                            pic.data_length);
+            found_any = true;
+        }
+    } while (FLAC__metadata_iterator_next(it));
+
+    return found_any;
+}
+
+}  // namespace
+
+struct WebServer::Impl {
+    // Nullable: when no playback device could be opened the engine/queue
+    // are absent but the HTTP server still runs so the device picker works.
+    eng::Engine*        engine;
+    fidelis::queue::Queue* queue;
+    lib::Library*       library;
+    WebConfig           cfg;
+
+    httplib::Server srv;
+    std::thread     listen_thread;
+    std::thread     push_thread;
+    std::atomic<bool> running{false};
+
+    // Live WebSocket connections for the telemetry broadcast. httplib runs
+    // each WS handler on its own thread; the handler registers its socket
+    // here and blocks until close, while push_thread fans snapshots out.
+    std::mutex                            ws_mtx;
+    std::unordered_set<httplib::ws::WebSocket*> ws_clients;
+
+    Impl(eng::Engine* e, fidelis::queue::Queue* q, lib::Library* l,
+         WebConfig c)
+        : engine(e), queue(q), library(l), cfg(std::move(c)) {}
+
+    bool auth_ok(const httplib::Request& req) const {
+        if (cfg.token.empty()) {
+            return true;
+        }
+        auto it = req.headers.find("Authorization");
+        if (it == req.headers.end()) {
+            return false;
+        }
+        const std::string_view want_prefix = "Bearer ";
+        const std::string&      got         = it->second;
+        if (got.size() <= want_prefix.size() ||
+            std::string_view(got).substr(0, want_prefix.size()) !=
+                want_prefix) {
+            return false;
+        }
+        return std::string_view(got).substr(want_prefix.size()) == cfg.token;
+    }
+
+    json build_state() {
+        if (engine == nullptr) {
+            return json{
+                {"state", "Idle"},
+                {"current_track", nullptr},
+                {"position_frames", 0},
+                {"queue_index", -1},
+                {"queue_size", 0},
+                {"no_device", true},
+            };
+        }
+        const auto snap  = engine->pipeline_snapshot();
+        const auto state = engine->state();
+
+        std::uint64_t position = 0;
+        if (snap.output.frames_written >=
+            snap.output.frames_written_at_track_start) {
+            position = snap.output.frames_written -
+                       snap.output.frames_written_at_track_start;
+        }
+
+        json current = nullptr;
+        if (!snap.source.file_path.empty()) {
+            current = json{
+                {"path", snap.source.file_path},
+                {"title", snap.source.tags.title},
+                {"artist", snap.source.tags.artist},
+                {"album", snap.source.tags.album},
+                {"duration_frames", snap.source.total_frames},
+                {"format",
+                 format_string(snap.source.sample_rate_hz,
+                               snap.decoder.output_format.sample_format,
+                               snap.source.channels)},
+            };
+        }
+
+        return json{
+            {"state", state_name(state)},
+            {"current_track", current},
+            {"position_frames", position},
+            {"queue_index", queue ? queue->current_index() : -1},
+            {"queue_size", queue ? queue->size() : 0},
+        };
+    }
+
+    json build_snapshot() {
+        const auto s = engine->pipeline_snapshot();
+
+        const char* rt_mode =
+            s.realtime.status.mode == eng::rt::Mode::Fifo ? "FIFO" : "OTHER";
+
+        const char* verdict = "No";
+        if (s.bit_perfect.level == eng::BitPerfectVerdict::Level::Yes) {
+            verdict = "Yes";
+        } else if (s.bit_perfect.level ==
+                   eng::BitPerfectVerdict::Level::Qualified) {
+            verdict = "Qualified";
+        }
+
+        return json{
+            {"engine_state", state_name(s.engine_state)},
+            {"source",
+             {{"file_path", s.source.file_path},
+              {"codec_name", s.source.codec_name},
+              {"sample_rate_hz", s.source.sample_rate_hz},
+              {"channels", s.source.channels},
+              {"bit_depth_file", s.source.bit_depth_file},
+              {"total_frames", s.source.total_frames},
+              {"bitrate_kbps", s.source.bitrate_kbps}}},
+            {"decoder",
+             {{"thread_state", s.decoder.thread_state},
+              {"frames_produced", s.decoder.frames_produced}}},
+            {"format_match",
+             {{"matched_ok", s.format_match.matched_ok},
+              {"declared",
+               format_string(s.format_match.declared.sample_rate_hz,
+                             s.format_match.declared.sample_format,
+                             s.format_match.declared.channels)},
+              {"matched",
+               format_string(s.format_match.matched.sample_rate_hz,
+                             s.format_match.matched.sample_format,
+                             s.format_match.matched.channels)},
+              {"rejection_reason", s.format_match.rejection_reason}}},
+            {"ring",
+             {{"capacity_bytes", s.ring.capacity_bytes},
+              {"fill_bytes", s.ring.fill_bytes},
+              {"fill_frames", s.ring.fill_frames},
+              {"fill_us", s.ring.fill_us.count()}}},
+            {"output",
+             {{"period_size_frames", s.output.period_size_frames},
+              {"periods", s.output.periods},
+              {"xrun_count", s.output.xrun_count},
+              {"frames_written", s.output.frames_written},
+              {"gapless_pending", s.output.gapless_pending}}},
+            {"device",
+             {{"current_hw_string", s.device.current_hw_string},
+              {"is_connected", s.device.is_connected}}},
+            {"realtime",
+             {{"mode", rt_mode},
+              {"fallback_reason", s.realtime.status.fallback_reason}}},
+            {"bit_perfect",
+             {{"level", verdict},
+              {"qualifications", s.bit_perfect.qualifications}}},
+        };
+    }
+
+    void serve_static(const httplib::Request& req, httplib::Response& res) {
+        const std::filesystem::path root = cfg.static_dir;
+        std::string rel = req.path;
+        if (rel.empty() || rel == "/") {
+            rel = "/index.html";
+        }
+        // Strip the leading slash and refuse path traversal.
+        std::filesystem::path candidate =
+            root / std::filesystem::path(rel).relative_path();
+        candidate = candidate.lexically_normal();
+
+        std::error_code ec;
+        const auto root_abs = std::filesystem::weakly_canonical(root, ec);
+        const auto cand_abs = std::filesystem::weakly_canonical(candidate, ec);
+
+        std::string body;
+        const bool inside =
+            !root_abs.empty() &&
+            cand_abs.string().rfind(root_abs.string(), 0) == 0;
+
+        if (inside && read_file(candidate, body)) {
+            auto ext = candidate.extension().string();
+            if (ext == ".js" || ext == ".css" || ext == ".woff2") {
+                // Hashed asset filenames — safe to cache forever.
+                res.set_header("Cache-Control",
+                               "public, max-age=31536000, immutable");
+            } else if (ext == ".html") {
+                // HTML files reference hashed assets; must not be stale.
+                res.set_header("Cache-Control", "no-store");
+            }
+            res.set_content(body, mime_for(candidate));
+            return;
+        }
+        // SPA fallback: serve index.html for unknown non-API paths.
+        if (read_file(root / "index.html", body)) {
+            res.set_header("Cache-Control", "no-store");
+            res.set_content(body, "text/html; charset=utf-8");
+            return;
+        }
+        not_found(res);
+    }
+
+    // Resolve cover art from the directory of a concrete audio file:
+    // embedded FLAC PICTURE -> named sidecar -> largest image in dir.
+    void serve_art_for_file(const std::filesystem::path& audio_path,
+                            httplib::Response& res) {
+        const std::filesystem::path dir = audio_path.parent_path();
+
+        // 1. Embedded art: FLAC PICTURE metadata block (fastest, no I/O scan).
+        {
+            auto ext = audio_path.extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(),
+                           [](unsigned char c) { return static_cast<char>(::tolower(c)); });
+            if (ext == ".flac") {
+                std::string body, mime;
+                if (read_flac_embedded_art(audio_path, body, mime)) {
+                    res.set_content(body, mime);
+                    return;
+                }
+            }
+        }
+
+        // 2. Named sidecar: common cover art filenames (case variants).
+        static constexpr const char* kSidecar[] = {
+            "cover.jpg",  "cover.png",  "cover.webp",
+            "Cover.jpg",  "Cover.png",
+            "folder.jpg", "folder.png",
+            "Folder.jpg", "Folder.png",
+            "front.jpg",  "front.png",
+            "Front.jpg",  "Front.png",
+            "artwork.jpg","artwork.png",
+            "AlbumArt.jpg","AlbumArtSmall.jpg",
+        };
+        for (const char* n : kSidecar) {
+            std::string body;
+            if (read_file(dir / n, body)) {
+                const std::filesystem::path p{n};
+                res.set_content(body, mime_for(p));
+                return;
+            }
+        }
+
+        // 3. Any image in the album directory (pick the largest to prefer
+        //    the hi-res scan over thumbnails).
+        {
+            std::string best_body;
+            std::string best_mime;
+            std::uintmax_t best_size = 0;
+            std::error_code ec;
+            for (const auto& entry :
+                 std::filesystem::directory_iterator(dir, ec)) {
+                if (!entry.is_regular_file(ec)) {
+                    continue;
+                }
+                auto e = entry.path().extension().string();
+                std::transform(e.begin(), e.end(), e.begin(),
+                               [](unsigned char c) { return static_cast<char>(::tolower(c)); });
+                if (e != ".jpg" && e != ".jpeg" && e != ".png" && e != ".webp") {
+                    continue;
+                }
+                const auto sz = entry.file_size(ec);
+                if (sz > best_size) {
+                    std::string body;
+                    if (read_file(entry.path(), body)) {
+                        best_body = std::move(body);
+                        best_mime = mime_for(entry.path());
+                        best_size = sz;
+                    }
+                }
+            }
+            if (!best_body.empty()) {
+                res.set_content(best_body, best_mime);
+                return;
+            }
+        }
+
+        not_found(res);
+    }
+
+    void serve_art(std::int64_t track_id, httplib::Response& res) {
+        if (library == nullptr) {
+            not_found(res);
+            return;
+        }
+        auto tr = library->track_by_id(track_id);
+        if (!tr) {
+            not_found(res);
+            return;
+        }
+        serve_art_for_file(tr->path, res);
+    }
+
+    void register_routes() {
+        // Auth gate. Skips '/' static root and '/api/art/*' per spec; the
+        // static SPA shell and cover art must load before the token is known.
+        srv.set_pre_routing_handler(
+            [this](const httplib::Request& req, httplib::Response& res) {
+                const std::string& p = req.path;
+                const bool exempt =
+                    p == "/" || p.rfind("/api/art/", 0) == 0 ||
+                    p.rfind("/api/", 0) != 0;
+                if (exempt) {
+                    return httplib::Server::HandlerResponse::Unhandled;
+                }
+                if (!auth_ok(req)) {
+                    unauthorized(res);
+                    return httplib::Server::HandlerResponse::Handled;
+                }
+                return httplib::Server::HandlerResponse::Unhandled;
+            });
+
+        srv.Get("/api/state",
+                [this](const httplib::Request&, httplib::Response& res) {
+                    send_json(res, 200, build_state());
+                });
+
+        srv.Post("/api/play",
+                 [this](const httplib::Request&, httplib::Response& res) {
+                     if (!engine) { no_device(res); return; }
+                     (void)engine->play();
+                     ok(res);
+                 });
+        srv.Post("/api/pause",
+                 [this](const httplib::Request&, httplib::Response& res) {
+                     if (!engine) { no_device(res); return; }
+                     (void)engine->pause();
+                     ok(res);
+                 });
+        srv.Post("/api/stop",
+                 [this](const httplib::Request&, httplib::Response& res) {
+                     if (!engine) { no_device(res); return; }
+                     (void)engine->stop();
+                     ok(res);
+                 });
+
+        srv.Post("/api/seek", [this](const httplib::Request& req,
+                                     httplib::Response& res) {
+            auto b = parse_body(req, res);
+            if (!b) {
+                return;
+            }
+            if (!b->contains("frame") || !(*b)["frame"].is_number()) {
+                bad_request(res);
+                return;
+            }
+            if (!engine) { no_device(res); return; }
+            (void)engine->seek((*b)["frame"].get<std::uint64_t>());
+            ok(res);
+        });
+
+        srv.Post("/api/load", [this](const httplib::Request& req,
+                                     httplib::Response& res) {
+            auto b = parse_body(req, res);
+            if (!b) {
+                return;
+            }
+            if (!b->contains("path") || !(*b)["path"].is_string()) {
+                bad_request(res);
+                return;
+            }
+            if (!engine || !queue) { no_device(res); return; }
+            const std::filesystem::path path =
+                (*b)["path"].get<std::string>();
+            const auto tracks = queue->tracks();
+            auto it           = std::find(tracks.begin(), tracks.end(), path);
+            if (it != tracks.end()) {
+                queue->jump(static_cast<int>(it - tracks.begin()));
+            } else {
+                (void)engine->load(path);
+            }
+            ok(res);
+        });
+
+        srv.Get("/api/queue",
+                [this](const httplib::Request&, httplib::Response& res) {
+                    if (!queue) {
+                        send_json(res, 200,
+                                  json{{"tracks", json::array()},
+                                       {"current_index", -1}});
+                        return;
+                    }
+                    const auto tracks = queue->tracks();
+                    json arr          = json::array();
+                    for (std::size_t i = 0; i < tracks.size(); ++i) {
+                        arr.push_back({{"index", i},
+                                       {"path", tracks[i].string()}});
+                    }
+                    send_json(res, 200,
+                              json{{"tracks", arr},
+                                   {"current_index", queue->current_index()}});
+                });
+
+        srv.Post("/api/queue/append", [this](const httplib::Request& req,
+                                              httplib::Response& res) {
+            auto b = parse_body(req, res);
+            if (!b) {
+                return;
+            }
+            if (!b->contains("path") || !(*b)["path"].is_string()) {
+                bad_request(res);
+                return;
+            }
+            if (!queue) { no_device(res); return; }
+            queue->append((*b)["path"].get<std::string>());
+            ok(res);
+        });
+
+        srv.Post("/api/queue/remove", [this](const httplib::Request& req,
+                                              httplib::Response& res) {
+            auto b = parse_body(req, res);
+            if (!b) {
+                return;
+            }
+            if (!b->contains("index") || !(*b)["index"].is_number_integer()) {
+                bad_request(res);
+                return;
+            }
+            if (!queue) { no_device(res); return; }
+            queue->remove((*b)["index"].get<int>());
+            ok(res);
+        });
+
+        srv.Post("/api/queue/reorder", [this](const httplib::Request& req,
+                                               httplib::Response& res) {
+            auto b = parse_body(req, res);
+            if (!b) {
+                return;
+            }
+            if (!b->contains("from") || !b->contains("to") ||
+                !(*b)["from"].is_number_integer() ||
+                !(*b)["to"].is_number_integer()) {
+                bad_request(res);
+                return;
+            }
+            if (!queue) { no_device(res); return; }
+            queue->move((*b)["from"].get<int>(), (*b)["to"].get<int>());
+            ok(res);
+        });
+
+        srv.Post("/api/queue/clear",
+                 [this](const httplib::Request&, httplib::Response& res) {
+                     if (!queue) { no_device(res); return; }
+                     queue->clear();
+                     ok(res);
+                 });
+
+        srv.Post("/api/queue/jump", [this](const httplib::Request& req,
+                                            httplib::Response& res) {
+            auto b = parse_body(req, res);
+            if (!b) {
+                return;
+            }
+            if (!b->contains("index") || !(*b)["index"].is_number_integer()) {
+                bad_request(res);
+                return;
+            }
+            if (!queue) { no_device(res); return; }
+            queue->jump((*b)["index"].get<int>());
+            ok(res);
+        });
+
+        srv.Get("/api/library/albums", [this](const httplib::Request&,
+                                               httplib::Response& res) {
+            if (library == nullptr) {
+                send_json(res, 200, json::array());
+                return;
+            }
+            auto albums = library->albums("");
+            json arr    = json::array();
+            if (albums) {
+                for (const auto& a : *albums) {
+                    arr.push_back({{"id", a.id},
+                                   {"title", a.title},
+                                   {"artist", a.album_artist},
+                                   {"year", a.date},
+                                   {"track_count", a.track_count}});
+                }
+            }
+            send_json(res, 200, arr);
+        });
+
+        srv.Get("/api/library/tracks", [this](const httplib::Request& req,
+                                               httplib::Response& res) {
+            if (library == nullptr) {
+                send_json(res, 200, json::array());
+                return;
+            }
+            if (!req.has_param("album_id")) {
+                bad_request(res);
+                return;
+            }
+            std::int64_t album_id = 0;
+            try {
+                album_id = std::stoll(req.get_param_value("album_id"));
+            } catch (...) {
+                bad_request(res);
+                return;
+            }
+            auto tracks = library->tracks_in_album(album_id);
+            json arr    = json::array();
+            if (tracks) {
+                for (const auto& t : *tracks) {
+                    arr.push_back(track_json(t));
+                }
+            }
+            send_json(res, 200, arr);
+        });
+
+        srv.Get("/api/library/search", [this](const httplib::Request& req,
+                                                httplib::Response& res) {
+            if (library == nullptr) {
+                send_json(res, 200, json::array());
+                return;
+            }
+            lib::SearchFilter f;
+            f.query = req.has_param("q") ? req.get_param_value("q") : "";
+            auto tracks = library->search(f);
+            json arr    = json::array();
+            if (tracks) {
+                for (const auto& t : *tracks) {
+                    arr.push_back(track_json(t));
+                }
+            }
+            send_json(res, 200, arr);
+        });
+
+        srv.Get("/api/devices", [this](const httplib::Request&,
+                                         httplib::Response& res) {
+            auto devs_r = eng::list_playback_devices();
+            json arr = json::array();
+            if (!devs_r) {
+                send_json(res, 200, arr);
+                return;
+            }
+            std::string active_hw;
+            if (engine != nullptr) {
+                active_hw = engine->pipeline_snapshot().device
+                                .current_hw_string;
+            }
+            for (const auto& d : *devs_r) {
+                json formats = json::array();
+                for (auto f : d.caps.formats) {
+                    formats.push_back(std::string(eng::sample_format_name(f)));
+                }
+                json rates = json::array();
+                for (auto r : d.caps.sample_rates) {
+                    rates.push_back(r);
+                }
+                std::string display_name = d.fingerprint.alsa_card_longname.empty()
+                    ? d.alsa_hw_string : d.fingerprint.alsa_card_longname;
+                arr.push_back({
+                    {"id",             d.id},
+                    {"alsa_hw_string", d.alsa_hw_string},
+                    {"display_name",   display_name},
+                    {"is_usb",         d.fingerprint.is_usb},
+                    {"active",         d.alsa_hw_string == active_hw},
+                    {"caps_probe_failed", d.caps.caps_probe_failed},
+                    {"probe_failure_reason", d.caps.probe_failure_reason},
+                    {"formats",        formats},
+                    {"sample_rates",   rates},
+                });
+            }
+            send_json(res, 200, arr);
+        });
+
+        srv.Post("/api/devices/select", [this](const httplib::Request& req,
+                                               httplib::Response& res) {
+            auto b = parse_body(req, res);
+            if (!b) {
+                return;
+            }
+            if (!b->contains("alsa_hw_string") ||
+                !(*b)["alsa_hw_string"].is_string()) {
+                bad_request(res);
+                return;
+            }
+            const std::string hw = (*b)["alsa_hw_string"].get<std::string>();
+            // Persist the stable fingerprint id, not the volatile hw string:
+            // a USB DAC can re-enumerate under a different ALSA card name
+            // (garbled product descriptor) and the hw string would then
+            // resolve to the wrong device or nothing. pick_device() resolves
+            // the id back to the current hw string at startup.
+            std::string to_save = hw;
+            if (auto devs = eng::list_playback_devices(); devs) {
+                for (const auto& d : *devs) {
+                    if (d.alsa_hw_string == hw && !d.id.empty()) {
+                        to_save = d.id;
+                        break;
+                    }
+                }
+            }
+            if (!cfg.config_path.empty()) {
+                fidelis::config::save_device_preferred(cfg.config_path,
+                                                           to_save);
+            }
+            send_json(res, 200, json{{"ok", true}, {"restart_required", true}});
+            // kill(getpid()) delivers to the process (kernel picks a thread),
+            // so main()'s sigsuspend() wakes up. raise() would only signal
+            // the calling thread, leaving main asleep forever.
+            ::kill(::getpid(), SIGTERM);
+        });
+
+        // Every simple-mixer control on the active card, mirroring alsamixer.
+        // Hardware-side: changing these tells the DAC to attenuate; the
+        // decode->ring->ALSA path stays bit-exact. Below max the DAC itself
+        // is no longer bit-perfect — surfaced, not coupled to a verdict.
+        srv.Get("/api/mixer", [this](const httplib::Request&,
+                                     httplib::Response& res) {
+            json arr = json::array();
+            if (engine == nullptr) {
+                send_json(res, 200, arr);
+                return;
+            }
+            const auto snap = engine->pipeline_snapshot();
+            if (snap.device.current_hw_string.empty()) {
+                send_json(res, 200, arr);
+                return;
+            }
+            for (const auto& c : eng::list_mixer_controls(
+                     snap.device.current_hw_string)) {
+                json items = json::array();
+                for (const auto& s : c.enum_items) {
+                    items.push_back(s);
+                }
+                arr.push_back({
+                    {"name",           c.name},
+                    {"index",          c.index},
+                    {"has_volume",     c.has_volume},
+                    {"has_db",         c.has_db},
+                    {"db_min_x100",    c.db_min_x100},
+                    {"db_max_x100",    c.db_max_x100},
+                    {"channel_pct",    c.channel_pct},
+                    {"has_switch",     c.has_switch},
+                    {"channel_switch", c.channel_switch},
+                    {"is_enum",        c.is_enum},
+                    {"enum_items",     items},
+                    {"enum_current",   c.enum_current},
+                });
+            }
+            send_json(res, 200, arr);
+        });
+
+        srv.Post("/api/mixer/set", [this](const httplib::Request& req,
+                                          httplib::Response& res) {
+            auto b = parse_body(req, res);
+            if (!b) {
+                return;
+            }
+            if (!b->contains("name") || !(*b)["name"].is_string() ||
+                !b->contains("kind") || !(*b)["kind"].is_string()) {
+                bad_request(res);
+                return;
+            }
+            if (engine == nullptr) { no_device(res); return; }
+            const auto snap = engine->pipeline_snapshot();
+            const std::string& hw = snap.device.current_hw_string;
+            if (hw.empty()) {
+                bad_request(res);
+                return;
+            }
+            const std::string name = (*b)["name"].get<std::string>();
+            const unsigned int idx =
+                b->contains("index") && (*b)["index"].is_number_unsigned()
+                    ? (*b)["index"].get<unsigned int>()
+                    : 0U;
+            const std::string kind = (*b)["kind"].get<std::string>();
+
+            bool ok_ = false;
+            if (kind == "volume" && (*b).contains("value") &&
+                (*b)["value"].is_number()) {
+                ok_ = eng::set_mixer_volume_pct(
+                    hw, name, idx, (*b)["value"].get<int>());
+            } else if (kind == "switch" && (*b).contains("value") &&
+                       (*b)["value"].is_boolean()) {
+                ok_ = eng::set_mixer_switch(
+                    hw, name, idx, (*b)["value"].get<bool>());
+            } else if (kind == "enum" && (*b).contains("value") &&
+                       (*b)["value"].is_number()) {
+                ok_ = eng::set_mixer_enum(
+                    hw, name, idx, (*b)["value"].get<int>());
+            } else {
+                bad_request(res);
+                return;
+            }
+            send_json(res, 200, json{{"ok", ok_}});
+        });
+
+        srv.Get(R"(/api/art/(\d+))", [this](const httplib::Request& req,
+                                             httplib::Response& res) {
+            std::int64_t id = 0;
+            try {
+                id = std::stoll(req.matches[1]);
+            } catch (...) {
+                not_found(res);
+                return;
+            }
+            serve_art(id, res);
+        });
+
+        // Convenience: art for an album by album id. Finds the first track and
+        // delegates to serve_art so the same sidecar + embedded logic applies.
+        srv.Get(R"(/api/art/album/(\d+))", [this](const httplib::Request& req,
+                                                   httplib::Response& res) {
+            if (library == nullptr) {
+                not_found(res);
+                return;
+            }
+            std::int64_t album_id = 0;
+            try {
+                album_id = std::stoll(req.matches[1]);
+            } catch (...) {
+                not_found(res);
+                return;
+            }
+            auto tracks = library->tracks_in_album(album_id);
+            if (!tracks || tracks->empty()) {
+                not_found(res);
+                return;
+            }
+            serve_art((*tracks)[0].id, res);
+        });
+
+        // Art for the currently-loaded track. The state/queue feed carries no
+        // library id, so Now Playing resolves art straight off the engine's
+        // live source path — works even for files outside the library.
+        srv.Get("/api/art/current", [this](const httplib::Request&,
+                                           httplib::Response& res) {
+            if (engine == nullptr) {
+                not_found(res);
+                return;
+            }
+            const auto snap = engine->pipeline_snapshot();
+            if (snap.source.file_path.empty()) {
+                not_found(res);
+                return;
+            }
+            serve_art_for_file(
+                std::filesystem::path{snap.source.file_path}, res);
+        });
+
+        // 10 Hz pipeline telemetry. The handler registers the socket and
+        // blocks reading until the client closes; push_thread does the writes.
+        srv.WebSocket(
+            "/api/snapshot",
+            [this](const httplib::Request&, httplib::ws::WebSocket& ws) {
+                {
+                    std::lock_guard lk(ws_mtx);
+                    ws_clients.insert(&ws);
+                }
+                std::string msg;
+                while (running.load(std::memory_order_relaxed) &&
+                       ws.is_open()) {
+                    if (ws.read(msg) == httplib::ws::ReadResult::Fail) {
+                        break;
+                    }
+                }
+                std::lock_guard lk(ws_mtx);
+                ws_clients.erase(&ws);
+            });
+
+        // Static assets + SPA fallback for everything not under /api/.
+        srv.Get(".*", [this](const httplib::Request& req,
+                             httplib::Response& res) {
+            if (req.path.rfind("/api/", 0) == 0) {
+                not_found(res);
+                return;
+            }
+            serve_static(req, res);
+        });
+    }
+
+    void push_loop() {
+        using namespace std::chrono_literals;
+        while (running.load(std::memory_order_relaxed)) {
+            // No engine: nothing to telemeter. The REST surface (incl. the
+            // device picker) stays up; clients just see no snapshot stream.
+            if (engine == nullptr) {
+                std::this_thread::sleep_for(250ms);
+                continue;
+            }
+            std::string payload;
+            {
+                payload = build_snapshot().dump();
+            }
+            {
+                std::lock_guard lk(ws_mtx);
+                for (auto* ws : ws_clients) {
+                    if (ws->is_open()) {
+                        ws->send(payload);
+                    }
+                }
+            }
+            std::this_thread::sleep_for(100ms);
+        }
+    }
+};
+
+WebServer::WebServer(eng::Engine* engine, fidelis::queue::Queue* queue,
+                     lib::Library* library, WebConfig cfg)
+    : impl_(std::make_unique<Impl>(engine, queue, library, std::move(cfg))) {}
+
+WebServer::~WebServer() {
+    stop();
+}
+
+void WebServer::start() {
+    if (impl_->running.exchange(true)) {
+        return;
+    }
+    impl_->register_routes();
+    impl_->listen_thread = std::thread([this] {
+        impl_->srv.listen(impl_->cfg.host, impl_->cfg.port);
+    });
+    impl_->push_thread = std::thread([this] { impl_->push_loop(); });
+}
+
+void WebServer::stop() {
+    if (!impl_->running.exchange(false)) {
+        return;
+    }
+    impl_->srv.stop();
+    if (impl_->push_thread.joinable()) {
+        impl_->push_thread.join();
+    }
+    if (impl_->listen_thread.joinable()) {
+        impl_->listen_thread.join();
+    }
+}
+
+}  // namespace fidelis::web
