@@ -15,7 +15,7 @@
 </script>
 
 {#if loading}
-  <div class="grid grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-5">
+  <div class="grid grid-cols-[repeat(auto-fill,minmax(120px,1fr))] gap-3 sm:grid-cols-[repeat(auto-fill,minmax(160px,1fr))] sm:gap-5">
     {#each Array(12) as _, i (i)}
       <div class="glass animate-pulse p-3">
         <div class="aspect-square rounded-xl bg-white/[0.04]"></div>
@@ -30,7 +30,7 @@
     <p>No albums in the library.</p>
   </div>
 {:else}
-  <div class="grid grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-5">
+  <div class="grid grid-cols-[repeat(auto-fill,minmax(120px,1fr))] gap-3 sm:grid-cols-[repeat(auto-fill,minmax(160px,1fr))] sm:gap-5">
     {#each albums as album (album.id)}
       <button
         class="glass group p-3 text-left transition hover:-translate-y-1 hover:bg-white/[0.12]"

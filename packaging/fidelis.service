@@ -1,0 +1,48 @@
+# systemd user unit for fidelis.
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp packaging/fidelis.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now fidelis
+#
+# The daemon will keep running across terminal exits / logout when
+# `loginctl enable-linger $USER` is set; otherwise it stops at logout.
+# Stop with `systemctl --user stop fidelis`; logs via `journalctl --user -u fidelis`.
+
+[Unit]
+Description=fidelis — bit-perfect Linux music player
+Documentation=https://github.com/neofytr/fidelis
+# Don't keep restarting if the binary or config are broken.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/fidelis
+# A bind error or missing DAC is recoverable on next launch; honour the
+# user pressing Stop, but bounce on any unexpected exit.
+Restart=on-failure
+RestartSec=3
+# fidelis itself is unprivileged; everything below is a defence-in-depth
+# best-effort. RT capability is granted via /etc/security/limits.d, not
+# via setuid or ambient caps.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+# Read/write only what fidelis touches.
+ReadWritePaths=%h/.config/fidelis %h/.local/share/fidelis
+ReadOnlyPaths=%h
+PrivateTmp=true
+PrivateDevices=false
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+# ALSA + udev access; nothing else.
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target

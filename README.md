@@ -80,7 +80,37 @@ Binary at `build/fidelis`.
 ./build/fidelis
 ```
 
-then open `http://localhost:7800` in any browser. The first connected USB DAC is picked automatically; switch via the **DAC** button. Configuration lives in `~/.config/fidelis/config.toml`:
+then open `http://localhost:7800` in any browser. The first connected USB DAC is picked automatically; switch via the **DAC** button.
+
+### Autostart (recommended)
+
+Install the systemd user unit so the daemon survives terminal exits and starts at login:
+
+```
+mkdir -p ~/.config/systemd/user
+cp packaging/fidelis.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now fidelis
+
+# (optional) keep running after logout:
+loginctl enable-linger "$USER"
+```
+
+Logs: `journalctl --user -u fidelis -f`.
+
+### CLI client
+
+The `ctl` subcommand talks to the running daemon over REST (host/token read from `~/.config/fidelis/config.toml`).
+
+```
+fidelis ctl status              # current player state as JSON
+fidelis ctl play | pause | toggle
+fidelis ctl next | prev
+fidelis ctl enqueue PATH        # append a file to the queue
+fidelis ctl clear               # clear the queue
+```
+
+Bind keyboard shortcuts in Hyprland / sway / i3 / etc. to these commands for global media control. Configuration lives in `~/.config/fidelis/config.toml`:
 
 ```toml
 [device]

@@ -54,7 +54,7 @@
   let matched = $derived(parseFormat(snap?.format_match.matched))
 </script>
 
-<div class="mx-auto flex h-full max-w-7xl flex-col p-6">
+<div class="mx-auto flex h-full max-w-7xl flex-col p-3 sm:p-6">
   <!-- Sticky verdict bar -->
   <div
     class="glass sticky top-0 z-10 mb-5 flex flex-wrap items-center gap-4 px-5 py-3"

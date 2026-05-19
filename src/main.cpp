@@ -10,6 +10,9 @@
 #include <fidelis/version.hpp>
 #include <fidelis/web/server.hpp>
 
+#include <httplib.h>
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
@@ -37,7 +40,8 @@ void print_version() {
 
 void print_help() {
     std::fputs(
-        "usage: fidelis [OPTIONS] [FILE]\n"
+        "usage: fidelis [OPTIONS] [FILE]                       (daemon mode)\n"
+        "       fidelis ctl <verb> [args]                      (CLI client)\n"
         "\n"
         "Linux-native, bit-perfect player for external USB DACs.\n"
         "Serves a web UI on http://localhost:7800 and an MPRIS interface.\n"
@@ -48,8 +52,124 @@ void print_help() {
         "  --version, -V       Print version and exit\n"
         "  --help, -h          Print this help and exit\n"
         "\n"
-        "Positional FILE is loaded and played at launch.\n",
+        "Positional FILE is loaded and played at launch.\n"
+        "\n"
+        "CLI verbs (talk to a running daemon over REST):\n"
+        "  status              Print current player state as JSON\n"
+        "  play | pause        Resume / pause playback\n"
+        "  next | prev         Jump to next / previous queued track\n"
+        "  toggle              Play if paused, pause if playing\n"
+        "  enqueue PATH        Append a file to the queue\n"
+        "  clear               Clear the queue\n"
+        "\n"
+        "CLI host / token come from the same config the daemon reads.\n",
         stdout);
+}
+
+// Talk to a running daemon. Reads host/port/token straight from the config
+// file the user (or daemon) already wrote. Returns the process exit code.
+int run_cli(int argc, char** argv,
+            const std::filesystem::path& config_path) {
+    if (argc < 3) {
+        std::fprintf(stderr, "fidelis ctl: missing verb. See --help.\n");
+        return 64;
+    }
+    std::string verb = argv[2];
+
+    // Load config to discover host/port/token.
+    std::string host = "127.0.0.1";
+    int         port = 7800;
+    std::string token;
+    if (!config_path.empty()) {
+        if (auto cfg = fidelis::config::load_file(config_path)) {
+            host = cfg->web.host.empty() ? "127.0.0.1" : cfg->web.host;
+            // 0.0.0.0 means "listen on every interface"; the CLI is local,
+            // so it always talks to loopback.
+            if (host == "0.0.0.0") host = "127.0.0.1";
+            port = cfg->web.port;
+            token = cfg->web.token;
+        }
+    }
+
+    httplib::Client cli(host, port);
+    cli.set_connection_timeout(2, 0);
+    cli.set_read_timeout(5, 0);
+    httplib::Headers headers;
+    if (!token.empty()) {
+        headers.emplace("Authorization", std::string{"Bearer "} + token);
+    }
+
+    auto do_post = [&](const std::string& path, const std::string& body) {
+        const auto r = cli.Post(path, headers, body, "application/json");
+        if (!r) {
+            std::fprintf(stderr, "fidelis ctl: %s: %s\n", path.c_str(),
+                         httplib::to_string(r.error()).c_str());
+            return 1;
+        }
+        if (r->status >= 400) {
+            std::fprintf(stderr, "fidelis ctl: %s: HTTP %d %s\n",
+                         path.c_str(), r->status, r->body.c_str());
+            return 1;
+        }
+        return 0;
+    };
+
+    auto do_get_state = [&](nlohmann::json& out) -> int {
+        const auto r = cli.Get("/api/state", headers);
+        if (!r || r->status >= 400) {
+            std::fprintf(stderr,
+                         "fidelis ctl: /api/state: %s\n",
+                         r ? std::to_string(r->status).c_str()
+                           : httplib::to_string(r.error()).c_str());
+            return 1;
+        }
+        out = nlohmann::json::parse(r->body, nullptr, false);
+        return 0;
+    };
+
+    if (verb == "status") {
+        nlohmann::json s;
+        if (int rc = do_get_state(s)) return rc;
+        std::fputs(s.dump(2).c_str(), stdout);
+        std::fputc('\n', stdout);
+        return 0;
+    }
+    if (verb == "play")   return do_post("/api/play",  "{}");
+    if (verb == "pause")  return do_post("/api/pause", "{}");
+    if (verb == "toggle") {
+        nlohmann::json s;
+        if (int rc = do_get_state(s)) return rc;
+        const std::string state = s.value("state", "Idle");
+        return do_post(state == "Playing" ? "/api/pause" : "/api/play", "{}");
+    }
+    if (verb == "next" || verb == "prev") {
+        nlohmann::json s;
+        if (int rc = do_get_state(s)) return rc;
+        const int idx  = s.value("queue_index", -1);
+        const int size = s.value("queue_size", 0);
+        const int next = (verb == "next") ? idx + 1 : idx - 1;
+        if (next < 0 || next >= size) {
+            std::fprintf(stderr, "fidelis ctl: at queue edge\n");
+            return 1;
+        }
+        return do_post("/api/queue/jump",
+                       nlohmann::json{{"index", next}}.dump());
+    }
+    if (verb == "enqueue") {
+        if (argc < 4) {
+            std::fprintf(stderr, "fidelis ctl enqueue: missing PATH\n");
+            return 64;
+        }
+        return do_post("/api/queue/append",
+                       nlohmann::json{{"path", argv[3]}}.dump());
+    }
+    if (verb == "clear") {
+        return do_post("/api/queue/clear", "{}");
+    }
+
+    std::fprintf(stderr, "fidelis ctl: unknown verb '%s'. See --help.\n",
+                 verb.c_str());
+    return 64;
 }
 
 struct ParsedArgs {
@@ -200,6 +320,24 @@ void wait_for_termination_signal() {
 } // namespace
 
 int main(int argc, char** argv) {
+    // ctl mode short-circuits everything: no engine, no library, no web
+    // server. Pass through to a tiny REST client that talks to the running
+    // daemon. The config file (default or via --config before "ctl") tells
+    // us where the daemon is listening.
+    if (argc >= 2 && std::string_view{argv[1]} == "ctl") {
+        std::filesystem::path cfg_path;
+        // Honour a --config that appears before "ctl"; default otherwise.
+        for (int i = 1; i + 1 < argc && std::string_view{argv[i]} != "ctl"; ++i) {
+            if (std::string_view{argv[i]} == "--config") {
+                cfg_path = argv[i + 1];
+            }
+        }
+        if (cfg_path.empty()) {
+            cfg_path = fidelis::config::default_config_path();
+        }
+        return run_cli(argc, argv, cfg_path);
+    }
+
     const ParsedArgs args = parse_args(argc, argv);
 
     if (args.error) {

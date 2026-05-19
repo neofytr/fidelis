@@ -67,7 +67,7 @@ executable(
   'fidelis',
   'src/main.cpp',
   include_directories : [inc_public, include_directories('src')],
-  dependencies : [engine_dep, library_dep, config_dep, dbus_dep, queue_dep, session_dep, web_dep],
+  dependencies : [engine_dep, library_dep, config_dep, dbus_dep, queue_dep, session_dep, web_dep, httplib_dep, nlohmann_vendored_dep],
   install : true,
 )
 

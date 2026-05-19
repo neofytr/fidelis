@@ -56,7 +56,7 @@
   }
 </script>
 
-<div class="mx-auto flex h-full max-w-6xl flex-col gap-5 p-6">
+<div class="mx-auto flex h-full max-w-6xl flex-col gap-4 sm:gap-5 p-3 sm:p-6">
   <header class="flex items-center justify-between gap-3">
     <h1 class="text-2xl font-bold text-white">Library</h1>
     <div class="flex items-center gap-3">

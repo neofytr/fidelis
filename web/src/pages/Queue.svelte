@@ -39,7 +39,7 @@
   }
 </script>
 
-<div class="mx-auto flex h-full max-w-4xl flex-col gap-5 p-6">
+<div class="mx-auto flex h-full max-w-4xl flex-col gap-4 sm:gap-5 p-3 sm:p-6">
   <header class="flex items-center justify-between">
     <div>
       <h1 class="text-2xl font-bold text-white">Queue</h1>
