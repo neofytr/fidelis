@@ -206,4 +206,11 @@ test_web_security = executable(
 )
 test('web_security', test_web_security)
 
+test_dsd_refused = executable(
+  'test_dsd_refused',
+  'dsd_refused.cpp',
+  dependencies : [engine_dep, doctest_dep],
+)
+test('dsd_refused', test_dsd_refused)
+
 

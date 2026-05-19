@@ -221,6 +221,17 @@ std::unexpected<Error> mismatch(const std::string& what) {
 
 std::expected<std::unique_ptr<IDecoder>, Error>
 open_decoder(const std::filesystem::path& path) {
+    // DSD is out of scope for v1.0 — fidelis only handles PCM. Refuse with
+    // a clear message rather than letting the magic probe fail opaquely.
+    // Native ALSA DSD endpoints and DoP land in 1.1.
+    {
+        const std::string ext = lowercase(path.extension().string());
+        if (ext == ".dsf" || ext == ".dff") {
+            return mismatch("DSD playback is not supported in this release "
+                            "(.dsf / .dff). Planned for fidelis 1.1.");
+        }
+    }
+
     std::FILE* fp = std::fopen(path.c_str(), "rb");
     if (!fp) {
         std::string msg = "fopen ";
