@@ -45,6 +45,16 @@ struct DbusSection {
     bool enabled = true;
 };
 
+struct WebSection {
+    // Empty host means "loopback" (127.0.0.1). 0.0.0.0 binds every interface.
+    std::string host = "127.0.0.1";
+    std::uint16_t port = 7800;
+    // Bearer token required on every /api/ route except /api/art/*. Empty
+    // means auth disabled — refused at startup unless host is loopback so a
+    // shared-LAN bind is never silently unauthenticated.
+    std::string token;
+};
+
 struct Config {
     DeviceSection device;
     AudioSection audio;
@@ -52,6 +62,7 @@ struct Config {
     ThemeSection theme;
     UiSection ui;
     DbusSection dbus;
+    WebSection web;
 };
 
 // Default location: $XDG_CONFIG_HOME/fidelis/config.toml, falling back to
@@ -80,6 +91,20 @@ load_file(const std::filesystem::path& path);
 // and parent directories if they do not exist. Preserves existing keys.
 void save_device_preferred(const std::filesystem::path& path,
                            const std::string& hw_string);
+
+// Write/replace the [web].token value in the config file at `path`. Creates
+// the file and parent dirs if needed. Preserves existing keys.
+void save_web_token(const std::filesystem::path& path,
+                    const std::string& token);
+
+// Generate a cryptographically-strong random bearer token (base64url, 32
+// bytes of entropy). Reads /dev/urandom; returns an empty string on failure.
+std::string generate_token();
+
+// True when `host` is bound only to the local machine ("", "127.0.0.1",
+// "::1", "localhost"). Anything else is treated as LAN-reachable and is
+// refused at startup with an empty token.
+bool is_loopback_host(std::string_view host);
 
 } // namespace fidelis::config
 

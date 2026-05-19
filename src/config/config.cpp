@@ -165,6 +165,20 @@ std::expected<Config, Error> parse(std::string_view toml_text) {
         }
     }
 
+    if (auto* w = tbl["web"].as_table()) {
+        if (auto v = (*w)["host"].value<std::string>()) {
+            cfg.web.host = *v;
+        }
+        if (auto v = (*w)["port"].value<std::int64_t>()) {
+            if (*v > 0 && *v <= 65535) {
+                cfg.web.port = static_cast<std::uint16_t>(*v);
+            }
+        }
+        if (auto v = (*w)["token"].value<std::string>()) {
+            cfg.web.token = *v;
+        }
+    }
+
     return cfg;
 }
 
@@ -205,6 +219,67 @@ void save_device_preferred(const std::filesystem::path& path,
     if (out) {
         out << tbl;
     }
+}
+
+void save_web_token(const std::filesystem::path& path,
+                    const std::string& token) {
+    toml::table tbl;
+    {
+        std::ifstream f(path);
+        if (f) {
+            try {
+                std::ostringstream os;
+                os << f.rdbuf();
+                tbl = toml::parse(os.str());
+            } catch (...) {
+            }
+        }
+    }
+    if (!tbl.contains("web")) {
+        tbl.insert("web", toml::table{});
+    }
+    tbl["web"].as_table()->insert_or_assign("token", token);
+
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    std::ofstream out(path, std::ios::trunc);
+    if (out) {
+        out << tbl;
+    }
+}
+
+bool is_loopback_host(std::string_view host) {
+    return host.empty() || host == "127.0.0.1" || host == "::1" ||
+           host == "localhost" || host == "0:0:0:0:0:0:0:1";
+}
+
+std::string generate_token() {
+    // 32 bytes = 256 bits of entropy; base64url-encoded to 43 chars (no '=').
+    constexpr std::size_t kBytes = 32;
+    unsigned char raw[kBytes];
+    std::ifstream rng("/dev/urandom", std::ios::binary);
+    if (!rng || !rng.read(reinterpret_cast<char*>(raw), kBytes)) {
+        return {};
+    }
+    static constexpr char kAlphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    std::string out;
+    out.reserve(((kBytes + 2) / 3) * 4);
+    for (std::size_t i = 0; i < kBytes; i += 3) {
+        const std::uint32_t b0 = raw[i];
+        const std::uint32_t b1 = (i + 1 < kBytes) ? raw[i + 1] : 0;
+        const std::uint32_t b2 = (i + 2 < kBytes) ? raw[i + 2] : 0;
+        const std::uint32_t triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push_back(kAlphabet[(triple >> 18) & 0x3F]);
+        out.push_back(kAlphabet[(triple >> 12) & 0x3F]);
+        if (i + 1 < kBytes) {
+            out.push_back(kAlphabet[(triple >> 6) & 0x3F]);
+        }
+        if (i + 2 < kBytes) {
+            out.push_back(kAlphabet[triple & 0x3F]);
+        }
+    }
+    return out;
 }
 
 } // namespace fidelis::config

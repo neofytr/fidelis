@@ -199,4 +199,11 @@ test_device_select = executable(
 )
 test('device_select', test_device_select)
 
+test_web_security = executable(
+  'test_web_security',
+  'web_security.cpp',
+  dependencies : [config_dep, doctest_dep],
+)
+test('web_security', test_web_security)
+
 

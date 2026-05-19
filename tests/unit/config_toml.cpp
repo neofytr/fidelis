@@ -31,6 +31,24 @@ int test_defaults() {
     if (!c.library.ignore_patterns.empty()) return fail("default ignore_patterns");
     if (!c.theme.follow_hyprland) return fail("default follow_hyprland");
     if (c.ui.default_view != DefaultView::Main) return fail("default view");
+    if (c.web.host != "127.0.0.1") return fail("default web.host");
+    if (c.web.port != 7800) return fail("default web.port");
+    if (!c.web.token.empty()) return fail("default web.token");
+    return 0;
+}
+
+int test_web_section_parsed() {
+    constexpr std::string_view text =
+        "[web]\n"
+        "host = \"0.0.0.0\"\n"
+        "port = 9000\n"
+        "token = \"abc123\"\n";
+    auto r = parse(text);
+    if (!r) return fail("parse web section");
+    const Config& c = *r;
+    if (c.web.host != "0.0.0.0") return fail("web.host");
+    if (c.web.port != 9000) return fail("web.port");
+    if (c.web.token != "abc123") return fail("web.token");
     return 0;
 }
 
@@ -114,6 +132,7 @@ int main() {
     if (int rc = test_partial_override();rc != 0) return rc;
     if (int rc = test_parse_error();     rc != 0) return rc;
     if (int rc = test_user_expansion();  rc != 0) return rc;
+    if (int rc = test_web_section_parsed(); rc != 0) return rc;
     std::puts("ok config_toml");
     return 0;
 }

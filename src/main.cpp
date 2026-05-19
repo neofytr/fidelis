@@ -299,6 +299,34 @@ int main(int argc, char** argv) {
     // to recover. engine/queue are passed as (possibly null) pointers.
     fidelis::web::WebConfig wcfg{};
     wcfg.config_path = config_path.string();
+    wcfg.host = config.web.host;
+    wcfg.port = config.web.port;
+    wcfg.token = config.web.token;
+
+    // Bind security policy:
+    //   - Loopback host: token optional (single-machine session is trusted).
+    //   - Non-loopback host: token required. If the user has not set one,
+    //     auto-generate, persist, and log it. Empty token + non-loopback is
+    //     a configuration error; refuse rather than expose an unauthenticated
+    //     control surface to the network.
+    if (!cfg::is_loopback_host(wcfg.host) && wcfg.token.empty()) {
+        const std::string gen = cfg::generate_token();
+        if (gen.empty()) {
+            std::fprintf(stderr,
+                         "fidelis: refusing to bind %s:%d with no auth token "
+                         "(could not read /dev/urandom to auto-generate one)\n",
+                         wcfg.host.c_str(),
+                         static_cast<int>(wcfg.port));
+            return 78;
+        }
+        cfg::save_web_token(config_path, gen);
+        wcfg.token = gen;
+        std::fprintf(stderr,
+                     "fidelis: generated a bearer token (also written to %s)\n"
+                     "         token: %s\n"
+                     "         use it in any client as: Authorization: Bearer <token>\n",
+                     config_path.c_str(), gen.c_str());
+    }
     auto web_server = std::make_unique<fidelis::web::WebServer>(
         engine.get(), queue.get(), library.get(), wcfg);
     web_server->start();
