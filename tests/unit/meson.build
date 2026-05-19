@@ -235,5 +235,12 @@ test_fs_browse = executable(
 )
 test('fs_browse', test_fs_browse)
 
+test_replaygain = executable(
+  'test_replaygain',
+  'replaygain.cpp',
+  dependencies : [engine_dep, doctest_dep],
+)
+test('replaygain', test_replaygain)
+
 
 

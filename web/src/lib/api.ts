@@ -244,6 +244,27 @@ export const api = {
   appendFolder(path: string): Promise<{ appended: string[] }> {
     return request('POST', '/api/queue/append-folder', { path })
   },
+
+  getReplayGain(): Promise<ReplayGainState> {
+    return request<ReplayGainState>('GET', '/api/replaygain')
+  },
+
+  setReplayGain(s: Partial<ReplayGainSettings>): Promise<{ ok: boolean }> {
+    return request('POST', '/api/replaygain', s)
+  },
+}
+
+export type ReplayGainMode = 'off' | 'track' | 'album'
+
+export interface ReplayGainSettings {
+  mode: ReplayGainMode
+  prevent_clipping: boolean
+}
+
+export interface ReplayGainState extends ReplayGainSettings {
+  // Linear factor in effect right now; 1.0 means no scaling. The Pipeline
+  // verdict drops to QUALIFIED whenever this is not 1.0.
+  linear: number
 }
 
 export interface FsEntry {

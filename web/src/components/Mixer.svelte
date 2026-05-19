@@ -1,6 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { api, type MixerControl } from '../lib/api'
+  import {
+    api,
+    type MixerControl,
+    type ReplayGainState,
+    type ReplayGainMode,
+  } from '../lib/api'
   import { X, RefreshCw } from 'lucide-svelte'
 
   let { onClose }: { onClose: () => void } = $props()
@@ -8,15 +13,36 @@
   let controls = $state<MixerControl[]>([])
   let loading = $state(true)
   let error = $state(false)
+  let rg = $state<ReplayGainState | null>(null)
 
   async function load() {
     try {
-      controls = await api.getMixer()
+      const [c, r] = await Promise.all([api.getMixer(), api.getReplayGain()])
+      controls = c
+      rg = r
       error = false
     } catch {
       error = true
     } finally {
       loading = false
+    }
+  }
+
+  async function setRgMode(mode: ReplayGainMode) {
+    try {
+      await api.setReplayGain({ mode })
+      rg = await api.getReplayGain()
+    } catch {
+      error = true
+    }
+  }
+
+  async function setRgClip(prevent_clipping: boolean) {
+    try {
+      await api.setReplayGain({ prevent_clipping })
+      rg = await api.getReplayGain()
+    } catch {
+      error = true
     }
   }
 
@@ -92,6 +118,51 @@
         <X size={15} />
       </button>
     </div>
+
+    {#if rg}
+      <div class="border-b border-[#1f1f1f] px-4 py-3">
+        <div class="mb-2 flex items-baseline justify-between gap-3">
+          <span class="text-[10px] uppercase tracking-[0.18em] text-white/55">
+            ReplayGain
+          </span>
+          <span class="text-[10px] tabular-nums text-white/35">
+            {rg.linear === 1
+              ? 'no scaling · bit-perfect path'
+              : `linear ${rg.linear.toFixed(3)} · ${(
+                  20 * Math.log10(rg.linear)
+                ).toFixed(2)} dB applied · QUALIFIED`}
+          </span>
+        </div>
+        <div class="flex flex-wrap items-center gap-1.5">
+          {#each ['off', 'album', 'track'] as m (m)}
+            <button
+              class="border px-2.5 py-1 text-[10px] uppercase tracking-[0.12em] transition
+                {rg.mode === m
+                  ? 'border-accent bg-accent text-black'
+                  : 'border-[#2b2b2b] text-white/55 hover:border-white/30 hover:text-white/85'}"
+              onclick={() => setRgMode(m as ReplayGainMode)}
+            >
+              {m}
+            </button>
+          {/each}
+          <label class="ml-3 flex items-center gap-2 text-[10px] text-white/45">
+            <input
+              type="checkbox"
+              checked={rg.prevent_clipping}
+              onchange={(e) =>
+                setRgClip((e.target as HTMLInputElement).checked)}
+            />
+            prevent clipping (peak-aware)
+          </label>
+        </div>
+        {#if rg.mode !== 'off'}
+          <div class="mt-1.5 text-[10px] text-amber-400/70">
+            digital scaling on the decoder thread — Pipeline verdict will
+            stay QUALIFIED while engaged.
+          </div>
+        {/if}
+      </div>
+    {/if}
 
     <div class="max-h-[64vh] overflow-y-auto">
       {#if loading}

@@ -45,6 +45,16 @@ struct DbusSection {
     bool enabled = true;
 };
 
+enum class RgConfigMode : std::uint8_t { Off, Track, Album };
+
+struct ReplayGainSection {
+    // Default off. Enabling drops the bit-perfect verdict to QUALIFIED,
+    // visibly. Album mode preserves intra-album dynamics; the loudness is
+    // matched per album, not per track.
+    RgConfigMode mode = RgConfigMode::Off;
+    bool prevent_clipping = true;
+};
+
 struct WebSection {
     // Empty host means "loopback" (127.0.0.1). 0.0.0.0 binds every interface.
     std::string host = "127.0.0.1";
@@ -63,6 +73,7 @@ struct Config {
     UiSection ui;
     DbusSection dbus;
     WebSection web;
+    ReplayGainSection replaygain;
 };
 
 // Default location: $XDG_CONFIG_HOME/fidelis/config.toml, falling back to
@@ -96,6 +107,11 @@ void save_device_preferred(const std::filesystem::path& path,
 // the file and parent dirs if needed. Preserves existing keys.
 void save_web_token(const std::filesystem::path& path,
                     const std::string& token);
+
+// Persist the [replaygain] section in the config file at `path`. Preserves
+// every other key.
+void save_replaygain(const std::filesystem::path& path,
+                     RgConfigMode mode, bool prevent_clipping);
 
 // Generate a cryptographically-strong random bearer token (base64url, 32
 // bytes of entropy). Reads /dev/urandom; returns an empty string on failure.

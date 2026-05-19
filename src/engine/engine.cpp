@@ -32,6 +32,7 @@
 #include <fidelis/engine/error.hpp>
 #include <fidelis/engine/format.hpp>
 #include <fidelis/engine/format_match.hpp>
+#include <fidelis/engine/replaygain.hpp>
 #include <fidelis/engine/ring.hpp>
 #include <fidelis/engine/rt.hpp>
 #include <fidelis/engine/telemetry.hpp>
@@ -203,6 +204,13 @@ struct Engine::Impl {
     std::unique_ptr<IDecoder> next_decoder;
     std::filesystem::path next_path;
 
+    // ReplayGain settings. Read on every TrackLoaded by the decoder thread
+    // (which uses tags() to compute the linear factor). Setters live on the
+    // public API; atomic word avoids needing a mutex for the read path.
+    std::atomic<std::uint32_t> rg_packed{0};
+    // High bit: prevent_clipping. Low byte: mode (0=Off,1=Track,2=Album).
+    std::atomic<float> rg_linear_now{1.0f};
+
     // Decode/audio coordination
     std::mutex run_mtx;
     std::condition_variable run_cv;
@@ -321,6 +329,23 @@ struct Engine::Impl {
         constexpr std::size_t MAX_FRAMES = 4096;
         // Heap-allocate once; no allocations in the loop.
         std::vector<std::byte> buf(MAX_FRAMES * frame_bytes);
+
+        // ReplayGain. Computed from the decoder's tags + the live engine
+        // setting; refreshed on every gapless decoder swap below. 1.0 means
+        // no scaling — fast path; the apply_gain helper returns immediately.
+        auto pick_rg_linear = [this](const Tags& t) {
+            const std::uint32_t packed =
+                rg_packed.load(std::memory_order_acquire);
+            ReplayGain rg{
+                static_cast<ReplayGain::Mode>(packed & 0xFFu),
+                (packed & 0x80000000u) != 0u};
+            RgConfig rcfg;
+            rcfg.mode = static_cast<RgMode>(rg.mode);
+            rcfg.prevent_clipping = rg.prevent_clipping;
+            return compute_replaygain_linear(t, rcfg);
+        };
+        float rg_linear = pick_rg_linear(decoder->tags());
+        rg_linear_now.store(rg_linear, std::memory_order_release);
         decode_state.store(DecodeState::Decoding, std::memory_order_relaxed);
 
         while (decoder_run.load(std::memory_order_acquire)) {
@@ -372,6 +397,11 @@ struct Engine::Impl {
                         frames_written.load(std::memory_order_relaxed),
                         std::memory_order_relaxed);
                     const Tags ntags = decoder->tags();
+                    // Recompute RG for the new track. Different albums
+                    // typically have different gain tags; this is the only
+                    // boundary at which the cached factor changes.
+                    rg_linear = pick_rg_linear(ntags);
+                    rg_linear_now.store(rg_linear, std::memory_order_release);
                     const std::uint64_t ntotal = decoder->total_frames();
                     // Update source stage so the snapshot reflects the new
                     // track while the ring continues uninterrupted.
@@ -419,6 +449,11 @@ struct Engine::Impl {
             frames_decoded.fetch_add(static_cast<std::uint64_t>(*r),
                                      std::memory_order_relaxed);
             const std::size_t bytes = *r * frame_bytes;
+            // ReplayGain: scale the decoded block before it reaches the
+            // ring. Fast path (rg_linear == 1.0f) is a no-op inside
+            // apply_gain — costs one branch when RG is off.
+            apply_gain(std::span<std::byte>(buf.data(), bytes),
+                       fmt.sample_format, rg_linear);
             std::size_t off = 0;
             while (off < bytes && decoder_run.load(std::memory_order_acquire)) {
                 const std::size_t wrote = ring->write(
@@ -1507,6 +1542,26 @@ bool Engine::digital_volume_active() const noexcept {
     return impl_->digital_volume_active_.load(std::memory_order_relaxed);
 }
 
+void Engine::set_replaygain(ReplayGain rg) {
+    std::uint32_t packed = static_cast<std::uint32_t>(rg.mode) & 0xFFu;
+    if (rg.prevent_clipping) {
+        packed |= 0x80000000u;
+    }
+    impl_->rg_packed.store(packed, std::memory_order_release);
+}
+
+Engine::ReplayGain Engine::replaygain() const {
+    const std::uint32_t packed = impl_->rg_packed.load(std::memory_order_acquire);
+    return ReplayGain{
+        static_cast<ReplayGain::Mode>(packed & 0xFFu),
+        (packed & 0x80000000u) != 0u,
+    };
+}
+
+float Engine::current_replaygain_linear() const noexcept {
+    return impl_->rg_linear_now.load(std::memory_order_acquire);
+}
+
 void Engine::set_event_callback(EventCallback cb) {
     std::lock_guard lk(impl_->cb_mtx);
     impl_->cb = std::move(cb);
@@ -1672,11 +1727,18 @@ PipelineSnapshot Engine::pipeline_snapshot() const {
 
     using L = BitPerfectVerdict::Level;
     const bool disconnected = !s.device.is_connected;
+    const bool rg_active =
+        impl_->rg_linear_now.load(std::memory_order_acquire) != 1.0f;
     if (disconnected) {
         v.level = L::No;
         v.qualifications.push_back("DAC currently disconnected");
     } else if (!v.digital_path_bitperfect || !v.no_mismatch_in_flight) {
         v.level = L::No;
+    } else if (rg_active) {
+        // Active ReplayGain is a deliberate, disclosed deviation — never
+        // PERFECT while engaged; users get the QUALIFIED pill with the
+        // dB amount surfaced via qualifications.
+        v.level = L::Qualified;
     } else if (v.rt_enabled && v.no_recent_xrun) {
         v.level = L::Yes;
     } else {
@@ -1697,6 +1759,16 @@ PipelineSnapshot Engine::pipeline_snapshot() const {
     }
     if (!s.realtime.status.memlocked) {
         v.qualifications.push_back("mlockall failed (RLIMIT_MEMLOCK)");
+    }
+    {
+        const float rg = impl_->rg_linear_now.load(std::memory_order_acquire);
+        const std::uint32_t packed =
+            impl_->rg_packed.load(std::memory_order_acquire);
+        const auto mode = static_cast<RgMode>(packed & 0xFFu);
+        if (rg != 1.0f) {
+            v.qualifications.push_back(
+                replaygain_qualification(rg, mode));
+        }
     }
 
     return s;

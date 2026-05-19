@@ -967,6 +967,79 @@ struct WebServer::Impl {
             send_json(res, 200, json{{"ok", ok_}});
         });
 
+        // ReplayGain. GET reports the live state (mode, clip-prevention
+        // toggle, and the linear factor in effect for the current track —
+        // 1.0 means no scaling). POST persists the change to config and
+        // applies it; takes effect on the next TrackLoaded.
+        srv.Get("/api/replaygain", [this](const httplib::Request&,
+                                          httplib::Response& res) {
+            if (engine != nullptr) {
+                const auto rg = engine->replaygain();
+                const char* mode_s =
+                    rg.mode == eng::Engine::ReplayGain::Mode::Album ? "album" :
+                    rg.mode == eng::Engine::ReplayGain::Mode::Track ? "track" : "off";
+                send_json(res, 200, json{
+                    {"mode", mode_s},
+                    {"prevent_clipping", rg.prevent_clipping},
+                    {"linear", engine->current_replaygain_linear()},
+                });
+                return;
+            }
+            // No engine yet — surface what is persisted on disk so the UI
+            // shows the user's pending choice instead of always "off".
+            std::string mode_s = "off";
+            bool prevent_clipping = true;
+            if (!cfg.config_path.empty()) {
+                if (auto loaded = fidelis::config::load_file(cfg.config_path)) {
+                    prevent_clipping = loaded->replaygain.prevent_clipping;
+                    mode_s =
+                        loaded->replaygain.mode == fidelis::config::RgConfigMode::Album ? "album" :
+                        loaded->replaygain.mode == fidelis::config::RgConfigMode::Track ? "track" : "off";
+                }
+            }
+            send_json(res, 200, json{
+                {"mode", mode_s},
+                {"prevent_clipping", prevent_clipping},
+                {"linear", 1.0f},
+            });
+        });
+        srv.Post("/api/replaygain", [this](const httplib::Request& req,
+                                           httplib::Response& res) {
+            auto b = parse_body(req, res);
+            if (!b) return;
+            // Setting persists to disk regardless of engine state — when
+            // no DAC is currently open the value applies on the next
+            // startup that does open one. This lets users configure RG
+            // before plugging the DAC in.
+            eng::Engine::ReplayGain rg = engine ? engine->replaygain()
+                                                : eng::Engine::ReplayGain{};
+            if (b->contains("mode") && (*b)["mode"].is_string()) {
+                const std::string m = (*b)["mode"].get<std::string>();
+                if      (m == "off"  ) rg.mode = eng::Engine::ReplayGain::Mode::Off;
+                else if (m == "track") rg.mode = eng::Engine::ReplayGain::Mode::Track;
+                else if (m == "album") rg.mode = eng::Engine::ReplayGain::Mode::Album;
+                else { bad_request(res); return; }
+            }
+            if (b->contains("prevent_clipping") &&
+                (*b)["prevent_clipping"].is_boolean()) {
+                rg.prevent_clipping = (*b)["prevent_clipping"].get<bool>();
+            }
+            if (engine) {
+                engine->set_replaygain(rg);
+            }
+            if (!cfg.config_path.empty()) {
+                fidelis::config::RgConfigMode cm =
+                    rg.mode == eng::Engine::ReplayGain::Mode::Album
+                        ? fidelis::config::RgConfigMode::Album
+                  : rg.mode == eng::Engine::ReplayGain::Mode::Track
+                        ? fidelis::config::RgConfigMode::Track
+                        : fidelis::config::RgConfigMode::Off;
+                fidelis::config::save_replaygain(
+                    cfg.config_path, cm, rg.prevent_clipping);
+            }
+            ok(res);
+        });
+
         srv.Get(R"(/api/art/(\d+))", [this](const httplib::Request& req,
                                              httplib::Response& res) {
             std::int64_t id = 0;

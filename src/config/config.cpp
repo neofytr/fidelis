@@ -179,6 +179,17 @@ std::expected<Config, Error> parse(std::string_view toml_text) {
         }
     }
 
+    if (auto* r = tbl["replaygain"].as_table()) {
+        if (auto v = (*r)["mode"].value<std::string>()) {
+            if      (*v == "off"   || v->empty()) cfg.replaygain.mode = RgConfigMode::Off;
+            else if (*v == "track") cfg.replaygain.mode = RgConfigMode::Track;
+            else if (*v == "album") cfg.replaygain.mode = RgConfigMode::Album;
+        }
+        if (auto v = (*r)["prevent_clipping"].value<bool>()) {
+            cfg.replaygain.prevent_clipping = *v;
+        }
+    }
+
     return cfg;
 }
 
@@ -239,6 +250,38 @@ void save_web_token(const std::filesystem::path& path,
         tbl.insert("web", toml::table{});
     }
     tbl["web"].as_table()->insert_or_assign("token", token);
+
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    std::ofstream out(path, std::ios::trunc);
+    if (out) {
+        out << tbl;
+    }
+}
+
+void save_replaygain(const std::filesystem::path& path,
+                     RgConfigMode mode, bool prevent_clipping) {
+    toml::table tbl;
+    {
+        std::ifstream f(path);
+        if (f) {
+            try {
+                std::ostringstream os;
+                os << f.rdbuf();
+                tbl = toml::parse(os.str());
+            } catch (...) {
+            }
+        }
+    }
+    if (!tbl.contains("replaygain")) {
+        tbl.insert("replaygain", toml::table{});
+    }
+    const char* mode_s =
+        mode == RgConfigMode::Album ? "album" :
+        mode == RgConfigMode::Track ? "track" : "off";
+    tbl["replaygain"].as_table()->insert_or_assign("mode", mode_s);
+    tbl["replaygain"].as_table()->insert_or_assign(
+        "prevent_clipping", prevent_clipping);
 
     std::error_code ec;
     std::filesystem::create_directories(path.parent_path(), ec);

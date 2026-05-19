@@ -34,6 +34,7 @@ engine_sources = files(
   'device/mixer.cpp',
   'device/probe.cpp',
   'device/select.cpp',
+  'dsp/replaygain.cpp',
   'format/match.cpp',
   'rt/apply.cpp',
   'trace/ring.cpp',

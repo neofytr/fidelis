@@ -133,6 +133,19 @@ public:
     // different track before the current one ends).
     void cancel_preload();
 
+    // ReplayGain. set_replaygain() takes effect on the next TrackLoaded;
+    // current_replaygain_linear() reports the factor currently in effect
+    // (1.0 means no scaling, bit-perfect path). Pure read; safe from any
+    // thread. The Pipeline snapshot also surfaces this in the verdict.
+    struct ReplayGain {
+        enum class Mode : std::uint8_t { Off, Track, Album };
+        Mode mode = Mode::Off;
+        bool prevent_clipping = true;
+    };
+    void set_replaygain(ReplayGain rg);
+    ReplayGain replaygain() const;
+    float current_replaygain_linear() const noexcept;
+
     State state() const noexcept;
     PcmFormat current_format() const noexcept;
 

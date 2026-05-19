@@ -234,6 +234,16 @@ int main(int argc, char** argv) {
         ec.device_id = device_id;
         if (auto e = eng::Engine::create(std::move(ec)); e) {
             engine = std::move(*e);
+            // Apply persisted ReplayGain so a daemon restart preserves the
+            // user's chosen mode. Takes effect on next TrackLoaded.
+            eng::Engine::ReplayGain rg;
+            rg.mode = config.replaygain.mode == cfg::RgConfigMode::Album
+                        ? eng::Engine::ReplayGain::Mode::Album
+                    : config.replaygain.mode == cfg::RgConfigMode::Track
+                        ? eng::Engine::ReplayGain::Mode::Track
+                        : eng::Engine::ReplayGain::Mode::Off;
+            rg.prevent_clipping = config.replaygain.prevent_clipping;
+            engine->set_replaygain(rg);
         } else {
             std::fprintf(stderr, "fidelis: engine create failed: %s\n",
                          e.error().message.c_str());
